@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Circuit Drop</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0f17;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// =====================================================================
+//  CIRCUIT DROP - prototype
+//  Connect the + wall (left) to the - wall (right) with falling pipe tiles.
+// =====================================================================
+
+// ---- Tunables -------------------------------------------------------
+const COLS = 7, ROWS = 12, T = 52;       // grid size and tile size (px)
+const WALL = 52, PANEL = 220;            // layout
+const MAX_CHARGES = 2;                   // banked power-ups
+const CHARGE_BASE = 2, CHARGE_PER_LINK = 5, CHARGE_PER_CIRCUIT = 20;
+const CHARGE_MERCY = 1.5;                // charge multiplier while the stack is dangerously high
+const SPARK_MS = 70;                     // spark speed along a closed circuit
+const LOCK_DELAY = 450;                  // ms before a resting tile locks
+const SETTLE_SPEED = 0.014;              // rows/ms for tiles falling after a clear
+const fallInterval = () => Math.max(110, 800 - (level - 1) * 65);
+const pInsulator   = () => Math.min(0.22, 0.03 + 0.018 * (level - 1));
+const P_RESISTOR = 0.06, P_BOMB = 0.03;
+// Tile shapes: mask bits are UP=1 RIGHT=2 DOWN=4 LEFT=8. w = weight in the bag.
+const SHAPES = [
+  { name: 'straight', mask: 5,  w: 4 },
+  { name: 'corner',   mask: 3,  w: 4 },
+  { name: 'tee',      mask: 11, w: 3 },
+  { name: 'cross',    mask: 15, w: 1 },
+  { name: 'end',      mask: 1,  w: 2 },
+];
+
+// ---- Constants derived from the above -------------------------------
+const BW = COLS * T, BH = ROWS * T;
+const CW = WALL + BW + WALL + PANEL, CH = BH;
+const UP = 1, RIGHT = 2, DOWN = 4, LEFT = 8;
+const DIRS = [
+  { bit: UP,    dr: -1, dc: 0 },
+  { bit: RIGHT, dr: 0,  dc: 1 },
+  { bit: DOWN,  dr: 1,  dc: 0 },
+  { bit: LEFT,  dr: 0,  dc: -1 },
+];
+const opp   = d => ((d << 2) | (d >> 2)) & 15;
+const rotCW = m => ((m << 1) | (m >> 3)) & 15;
+const rotCCW = m => ((m >> 1) | (m << 3)) & 15;
+const bits  = m => (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1);
+
+const canvas = document.getElementById('c');
+const g = canvas.getContext('2d');
+const dpr = Math.min(2, window.devicePixelRatio || 1);
+canvas.width = CW * dpr; canvas.height = CH * dpr;
+g.scale(dpr, dpr);
+function fit() {                                  // keep aspect ratio, fill the window
+  const k = Math.min(innerWidth / CW, innerHeight * 0.97 / CH, 1.5);
+  canvas.style.width = Math.floor(CW * k) + 'px';
+  canvas.style.height = Math.floor(CH * k) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+// ---- Sound (tiny WebAudio beeps) ------------------------------------
+let actx = null, muted = false;
+function beep(f, d = 0.08, type = 'square', v = 0.035, slide = 0) {
+  if (muted) return;
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const t0 = actx.currentTime, o = actx.createOscillator(), a = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f, t0);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t0 + d);
+    a.gain.setValueAtTime(v, t0);
+    a.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+    o.connect(a).connect(actx.destination);
+    o.start(t0); o.stop(t0 + d);
+  } catch (e) { /* audio is optional */ }
+}
+
+// ---- Game state -----------------------------------------------------
+let grid, cur, hold, canHold, queue, bag, score, level, circuits, chain;
+let state = 'ready';            // ready | play | clearing | settling | over
+let paused = false;
+let gravAcc = 0, lockAcc = 0, curX = 0, clearing = null;
+let particles = [], texts = [], wallGlow = 0, volt = 0, best = 0;
+let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked power-ups, undo target
+try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
+
+function emptyGrid() { return Array.from({ length: ROWS }, () => Array(COLS).fill(null)); }
+function newTile(kind, mask) { return { kind, mask, hp: kind === 'res' ? 2 : 1, dy: 0, lit: false, cl: false, cr: false }; }
+
+function refillBag() {
+  bag = [];
+  for (const s of SHAPES) for (let i = 0; i < s.w; i++) bag.push(s);
+  for (let i = bag.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [bag[i], bag[j]] = [bag[j], bag[i]]; }
+}
+function makeNext() {
+  const r = Math.random(), pi = pInsulator();
+  if (r < pi) return newTile('ins', 0);
+  if (r < pi + P_BOMB) return newTile('bomb', 0);
+  if (!bag.length) refillBag();
+  let mask = bag.pop().mask;
+  for (let i = (Math.random() * 4) | 0; i > 0; i--) mask = rotCW(mask);
+  return newTile(Math.random() < P_RESISTOR ? 'res' : 'normal', mask);
+}
+
+function reset() {
+  grid = emptyGrid(); bag = []; queue = []; hold = null; canHold = true;
+  score = 0; level = 1; circuits = 0; chain = 0;
+  particles = []; texts = []; clearing = null; paused = false; volt = 0;
+  charge = 0; charges = 0; lastLock = null;
+  for (let i = 0; i < 3; i++) queue.push(makeNext());
+  spawn();
+}
+function spawn() {
+  canHold = true;
+  startPiece(queue.shift());
+  queue.push(makeNext());
+}
+function startPiece(t) {
+  cur = { tile: t, col: COLS >> 1, row: 0, y: -1 };
+  curX = cur.col; gravAcc = 0; lockAcc = 0; state = 'play';
+  if (grid[0][cur.col]) gameOver();
+}
+function gameOver() {
+  state = 'over'; cur = null;
+  if (score > best) { best = score; try { localStorage.setItem('circuitDropBest', best); } catch (e) {} }
+  beep(220, 0.5, 'sawtooth', 0.05, -160);
+}
+
+// ---- Grid helpers ---------------------------------------------------
+const inRange = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
+const canMove = (r, c) => inRange(r, c) && !grid[r][c];
+
+// Flood-fill from the left (or right) wall along matching openings.
+// Returns Map(cellKey -> distance from the wall).
+function flood(fromLeft) {
+  const dist = new Map(), q = [];
+  const c0 = fromLeft ? 0 : COLS - 1, bit = fromLeft ? LEFT : RIGHT;
+  for (let r = 0; r < ROWS; r++) {
+    const t = grid[r][c0];
+    if (t && (t.mask & bit)) { dist.set(r * COLS + c0, 0); q.push([r, c0]); }
+  }
+  for (let i = 0; i < q.length; i++) {
+    const [r, c] = q[i], t = grid[r][c], d = dist.get(r * COLS + c);
+    for (const D of DIRS) {
+      if (!(t.mask & D.bit)) continue;
+      const nr = r + D.dr, nc = c + D.dc;
+      if (!inRange(nr, nc)) continue;
+      const n = grid[nr][nc];
+      if (!n || !(n.mask & opp(D.bit))) continue;
+      const k = nr * COLS + nc;
+      if (dist.has(k)) continue;
+      dist.set(k, d + 1); q.push([nr, nc]);
+    }
+  }
+  return dist;
+}
+function updateFlags(L) {
+  const R = flood(false);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const t = grid[r][c];
+    if (t) { t.cl = L.has(r * COLS + c); t.cr = R.has(r * COLS + c); }
+  }
+}
+
+// ---- Locking, resolving circuits, clearing --------------------------
+function lockPiece() {
+  const { tile, col, row } = cur;
+  grid[row][col] = tile; tile.dy = row; cur = null;
+  chain = 0;
+  beep(130, 0.07, 'triangle', 0.06, -40);
+  if (tile.kind !== 'bomb') {
+    lastLock = { row, col, tile };
+    // every drop charges a little; every link to a neighbour or wall charges more
+    let links = 0;
+    for (const D of DIRS) {
+      if (!(tile.mask & D.bit)) continue;
+      const nr = row + D.dr, nc = col + D.dc;
+      if (!inRange(nr, nc)) { if (D.bit === LEFT || D.bit === RIGHT) links++; continue; }
+      const n = grid[nr][nc];
+      if (n && (n.mask & opp(D.bit))) links++;
+    }
+    const gain = addCharge(CHARGE_BASE + links * CHARGE_PER_LINK);
+    if (links > 0 && gain > 0) {
+      popText('+' + Math.round(gain), WALL + (col + 0.5) * T, row * T + 6, '#3de0d0', 13);
+      beep(500 + links * 120, 0.05, 'sine', 0.04);
+    }
+  }
+  if (tile.kind === 'bomb') {
+    const cells = [];
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      if (inRange(row + dr, col + dc) && grid[row + dr][col + dc]) cells.push({ r: row + dr, c: col + dc, d: 0, fired: false });
+    }
+    startClear(cells, 'bomb');
+    return;
+  }
+  resolve();
+}
+
+function resolve() {
+  const L = flood(true);
+  let closed = false;
+  for (const k of L.keys()) {
+    const r = (k / COLS) | 0, c = k % COLS;
+    if (c === COLS - 1 && (grid[r][c].mask & RIGHT)) { closed = true; break; }
+  }
+  if (closed) {
+    const cells = [];
+    for (const [k, d] of L) cells.push({ r: (k / COLS) | 0, c: k % COLS, d, fired: false });
+    startClear(cells, 'circuit');
+    return;
+  }
+  updateFlags(L);
+  if (chain > 0 && grid.every(row => row.every(t => !t))) {
+    score += 1000; popText('ALL CLEAR  +1000', WALL + BW / 2, BH / 2, '#7dffb0', 22);
+    beep(880, 0.4, 'sine', 0.06, 440);
+  }
+  chain = 0;
+  spawn();
+}
+
+// ---- Charge meter & power-ups ----------------------------------------
+function addCharge(n) {
+  if (charges >= MAX_CHARGES) return 0;
+  if (volt > 0.55) n *= CHARGE_MERCY;           // struggling players charge faster
+  charge += n;
+  while (charge >= 100 && charges < MAX_CHARGES) {
+    charge -= 100; charges++;
+    popText('POWER READY', WALL + BW / 2, BH / 2 - 60, '#3de0d0', 20);
+    beep(660, 0.25, 'sine', 0.06, 440);
+  }
+  if (charges >= MAX_CHARGES) charge = 100;
+  return n;
+}
+const topInCol = c => { for (let r = 0; r < ROWS; r++) if (grid[r][c]) return r; return -1; };
+const undoable = () => !!(cur && lastLock && grid[lastLock.row][lastLock.col] === lastLock.tile);
+
+function usePower(i) {
+  if (charges <= 0 || !cur || state !== 'play') return;
+  let ok = false;
+  if (i === 0) {                                // ZAP: delete the top tile of the column you're over
+    const r = topInCol(cur.col);
+    if (r >= 0) {
+      grid[r][cur.col] = null;
+      for (let y = cur.row; y <= r; y++) burst(WALL + (cur.col + 0.5) * T, (y + 0.5) * T, '#3de0d0', 3);
+      popText('ZAP!', WALL + (cur.col + 0.5) * T, r * T + 10, '#3de0d0', 18);
+      updateFlags(flood(true)); beep(900, 0.18, 'sawtooth', 0.04, -600); ok = true;
+    }
+  } else if (i === 1) {                         // UNDO: take back the last drop
+    if (undoable()) {
+      const L = lastLock;
+      grid[L.row][L.col] = null;
+      queue.unshift(cur.tile); queue.length = 3;
+      L.tile.cl = L.tile.cr = false;
+      startPiece(L.tile); lastLock = null;
+      updateFlags(flood(true));
+      popText('UNDO', WALL + (L.col + 0.5) * T, L.row * T + 10, '#3de0d0', 18);
+      beep(300, 0.2, 'triangle', 0.05, 400); ok = true;
+    }
+  } else {                                      // CROSS: turn the falling tile into a 4-way junction
+    const t = cur.tile; t.kind = 'normal'; t.mask = 15; t.hp = 1;
+    popText('CROSS', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18);
+    beep(700, 0.15, 'sine', 0.05, 300); ok = true;
+  }
+  if (ok) { charges--; if (charge >= 100) charge = 0; }
+}
+
+function startClear(cells, kind) {
+  chain++; lastLock = null;
+  if (kind === 'circuit') addCharge(CHARGE_PER_CIRCUIT * chain);
+  let maxD = 0, special = 0, sx = 0, sy = 0;
+  for (const cl of cells) {
+    const t = grid[cl.r][cl.c];
+    maxD = Math.max(maxD, cl.d); sx += cl.c; sy += cl.r;
+    if (bits(t.mask) >= 3) special++;
+  }
+  const n = cells.length;
+  let pts;
+  if (kind === 'circuit') {
+    pts = (n * 10 + maxD * 5 + special * 20) * chain;
+    circuits++; level = 1 + Math.floor(circuits / 3); wallGlow = 1;
+  } else {
+    pts = n * 15 * chain;
+  }
+  score += pts;
+  const px = WALL + (sx / n + 0.5) * T, py = (sy / n + 0.5) * T;
+  popText('+' + pts, px, py, '#ffe066', 20);
+  if (chain > 1) popText('CHAIN x' + chain, px, py + 24, '#ff9bd0', 16);
+  clearing = { cells, kind, t: 0, end: maxD * SPARK_MS + (kind === 'circuit' ? 450 : 350) };
+  state = 'clearing';
+}
+
+function updateClearing(dt) {
+  clearing.t += dt;
+  for (const cl of clearing.cells) {
+    if (!cl.fired && clearing.t >= cl.d * SPARK_MS) {
+      cl.fired = true;
+      const t = grid[cl.r][cl.c];
+      if (t) t.lit = true;
+      burst(WALL + (cl.c + 0.5) * T, (cl.r + 0.5) * T, clearing.kind === 'bomb' ? '#ff8a3d' : '#ffe27a', 7);
+      beep(380 + cl.d * 45 + chain * 60, 0.09, 'square', 0.03);
+    }
+  }
+  if (clearing.t >= clearing.end) finishClear();
+}
+
+function finishClear() {
+  const { cells, kind } = clearing;
+  for (const cl of cells) {
+    const t = grid[cl.r][cl.c];
+    if (!t) continue;
+    if (kind === 'circuit' && t.kind === 'res' && t.hp > 1) {   // resistor survives the first pulse
+      t.hp--; t.kind = 'normal'; t.lit = false; continue;
+    }
+    grid[cl.r][cl.c] = null;
+  }
+  if (kind === 'circuit') {                                       // insulators touching the circuit burn out
+    for (const cl of cells) for (const D of DIRS) {
+      const nr = cl.r + D.dr, nc = cl.c + D.dc;
+      if (inRange(nr, nc) && grid[nr][nc] && grid[nr][nc].kind === 'ins') {
+        grid[nr][nc] = null; score += 5;
+        burst(WALL + (nc + 0.5) * T, (nr + 0.5) * T, '#9aa3b5', 5);
+      }
+    }
+  }
+  clearing = null;
+  applyGravity();
+  state = 'settling';
+}
+
+function applyGravity() {
+  for (let c = 0; c < COLS; c++) {
+    let w = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (!grid[r][c]) continue;
+      if (r !== w) { grid[w][c] = grid[r][c]; grid[r][c] = null; }   // dy keeps old row -> animates down
+      w--;
+    }
+  }
+}
+
+// Animate tiles toward their grid row. Returns true while anything is still moving.
+function animTiles(dt) {
+  let moving = false;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const t = grid[r][c];
+    if (t && t.dy < r) { t.dy = Math.min(r, t.dy + SETTLE_SPEED * dt); moving = true; }
+  }
+  return moving;
+}
+
+// ---- Effects --------------------------------------------------------
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = 0.05 + Math.random() * 0.2;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 0.05, life: 350 + Math.random() * 350, max: 700, color });
+  }
+}
+function popText(text, x, y, color, size) { texts.push({ text, x, y, color, size, life: 1100 }); }
+function updateFx(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 0.0005 * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+  for (const t of texts) { t.y -= 0.03 * dt; t.life -= dt; }
+  texts = texts.filter(t => t.life > 0);
+  wallGlow = Math.max(0, wallGlow - dt * 0.0015);
+}
+
+// ---- Update loop ----------------------------------------------------
+const keys = new Set();
+function updatePlay(dt) {
+  if (!cur) return;
+  const down = keys.has('ArrowDown') || keys.has('KeyS');
+  const interval = down ? Math.min(45, fallInterval()) : fallInterval();
+  if (canMove(cur.row + 1, cur.col)) {
+    lockAcc = 0; gravAcc += dt;
+    while (gravAcc >= interval && canMove(cur.row + 1, cur.col)) { gravAcc -= interval; cur.row++; }
+  } else {
+    gravAcc = 0; lockAcc += dt * (down ? 4 : 1);
+    if (lockAcc >= LOCK_DELAY) { lockPiece(); return; }
+  }
+  const k = Math.min(1, dt * 0.03);
+  cur.y += (cur.row - cur.y) * k;
+  curX += (cur.col - curX) * Math.min(1, dt * 0.04);
+}
+
+function update(dt) {
+  const moving = animTiles(dt);
+  if (state === 'play') updatePlay(dt);
+  else if (state === 'clearing') updateClearing(dt);
+  else if (state === 'settling' && !moving) resolve();
+  updateFx(dt);
+  // voltage meter = how high the stack is
+  let top = ROWS;
+  for (let r = 0; r < ROWS && top === ROWS; r++) if (grid[r].some(Boolean)) top = r;
+  volt += ((ROWS - top) / ROWS - volt) * Math.min(1, dt * 0.01);
+}
+
+// ---- Input ----------------------------------------------------------
+addEventListener('keydown', e => {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  if (e.code === 'KeyM') { muted = !muted; return; }
+  if (state === 'ready' || state === 'over') {
+    if (e.code === 'Enter' || e.code === 'Space') reset();
+    return;
+  }
+  if (e.code === 'KeyR') { reset(); return; }
+  if (e.code === 'KeyP' || e.code === 'Escape') { paused = !paused; return; }
+  if (paused || state !== 'play' || !cur) return;
+  const t = cur.tile;
+  switch (e.code) {
+    case 'ArrowLeft': case 'KeyA':
+      if (canMove(cur.row, cur.col - 1)) { cur.col--; beep(300, 0.03, 'square', 0.02); } break;
+    case 'ArrowRight': case 'KeyD':
+      if (canMove(cur.row, cur.col + 1)) { cur.col++; beep(300, 0.03, 'square', 0.02); } break;
+    case 'ArrowUp': case 'KeyW': case 'KeyX':
+      t.mask = rotCW(t.mask); beep(520, 0.04, 'square', 0.025); break;
+    case 'KeyZ':
+      t.mask = rotCCW(t.mask); beep(480, 0.04, 'square', 0.025); break;
+    case 'Space':
+      while (canMove(cur.row + 1, cur.col)) cur.row++;
+      lockPiece(); break;
+    case 'Digit1': case 'Numpad1': usePower(0); break;
+    case 'Digit2': case 'Numpad2': usePower(1); break;
+    case 'Digit3': case 'Numpad3': usePower(2); break;
+    case 'KeyC': case 'ShiftLeft': case 'ShiftRight':
+      if (!canHold) break;
+      canHold = false;
+      if (hold) { const h = hold; hold = t; startPiece(h); }
+      else { hold = t; startPiece(queue.shift()); queue.push(makeNext()); }
+      beep(420, 0.06, 'triangle', 0.04, 200);
+      break;
+  }
+});
+addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+
+// ---- Rendering ------------------------------------------------------
+function rr(x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);         g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+
+function drawTile(x, y, t, s, alpha = 1) {
+  g.save();
+  g.translate(x, y); g.globalAlpha = alpha;
+  const p = s * 0.04, cx = s / 2, cy = s / 2, lw = s * 0.2;
+
+  if (t.kind === 'ins') {                       // insulator: hatched dead block
+    rr(p, p, s - 2 * p, s - 2 * p, s * 0.12);
+    g.fillStyle = '#30353f'; g.fill();
+    g.save(); g.clip();
+    g.strokeStyle = '#464d5a'; g.lineWidth = 3;
+    for (let i = -s; i < 2 * s; i += 10) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i + s, s); g.stroke(); }
+    g.restore();
+    rr(p, p, s - 2 * p, s - 2 * p, s * 0.12);
+    g.strokeStyle = '#59616f'; g.lineWidth = 1.5; g.stroke();
+    g.restore(); return;
+  }
+
+  rr(p, p, s - 2 * p, s - 2 * p, s * 0.12);
+  g.fillStyle = t.lit ? '#3b3516' : '#151d2b'; g.fill();
+  g.lineWidth = 1.5; g.strokeStyle = t.lit ? '#ffe066' : '#27344a'; g.stroke();
+
+  if (t.kind === 'bomb') {
+    g.font = `${s * 0.6}px "Segoe UI Emoji", sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('\u{1F4A3}', cx, cy + s * 0.03);
+    g.restore(); return;
+  }
+
+  const col = t.lit ? '#fff3a0' : (t.cl && t.cr) ? '#d6a8ff' : t.cl ? '#ff8f7d' : t.cr ? '#72b8ff' : '#8b99b3';
+  const core = t.lit ? '#fffbd0' : '#0e1522';
+  if (t.lit) { g.shadowColor = '#ffd84a'; g.shadowBlur = 16; }
+  g.lineCap = 'butt';
+  g.strokeStyle = col; g.fillStyle = col; g.lineWidth = lw;
+  for (const D of DIRS) if (t.mask & D.bit) {
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + D.dc * s / 2, cy + D.dr * s / 2); g.stroke();
+  }
+  g.beginPath(); g.arc(cx, cy, lw * 0.62, 0, 7); g.fill();
+  g.shadowBlur = 0;
+  g.strokeStyle = core; g.fillStyle = core; g.lineWidth = lw * 0.4;
+  for (const D of DIRS) if (t.mask & D.bit) {
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + D.dc * s / 2, cy + D.dr * s / 2); g.stroke();
+  }
+  g.beginPath(); g.arc(cx, cy, lw * 0.3, 0, 7); g.fill();
+
+  if (t.kind === 'res') {                       // resistor: needs two pulses
+    g.fillStyle = '#ffb347';
+    rr(cx - lw * 0.95, cy - lw * 0.95, lw * 1.9, lw * 1.9, 4); g.fill();
+    g.fillStyle = '#2a1a05'; g.font = `bold ${s * 0.28}px system-ui`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('Ω', cx, cy + 1);
+  }
+  g.restore();
+}
+
+function drawWall(x0, left) {
+  const c = left ? '#ff5d4d' : '#4da3ff';
+  const gr = g.createLinearGradient(x0, 0, x0 + WALL, 0);
+  gr.addColorStop(left ? 0 : 1, left ? '#2a1114' : '#0f1d33');
+  gr.addColorStop(left ? 1 : 0, '#0b0f17');
+  g.fillStyle = gr; g.fillRect(x0, 0, WALL, CH);
+
+  g.save();                                     // coil
+  g.strokeStyle = c; g.lineWidth = 3.5; g.lineJoin = 'round';
+  g.shadowColor = c; g.shadowBlur = 6 + wallGlow * 26; g.globalAlpha = 0.7 + 0.3 * wallGlow;
+  g.beginPath();
+  const a = x0 + 10, b = x0 + WALL - 14;
+  let i = 0;
+  for (let y = 48; y <= CH - 48; y += 20, i++) { const x = i % 2 ? a : b; if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+  g.stroke();
+  g.restore();
+
+  const rx = left ? x0 + WALL - 2 : x0 + 2;     // rail facing the board
+  g.fillStyle = c; g.globalAlpha = 0.85; g.fillRect(rx - 1.5, 0, 3, CH); g.globalAlpha = 1;
+  g.font = 'bold 32px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(left ? '+' : '−', x0 + WALL / 2, 24);
+  g.fillText(left ? '+' : '−', x0 + WALL / 2, CH - 24);
+
+  const c0 = left ? 0 : COLS - 1, bit = left ? LEFT : RIGHT;   // contact nodes
+  for (let r = 0; r < ROWS; r++) {
+    const t = grid[r][c0];
+    if (!t || !(t.mask & bit)) continue;
+    const on = left ? t.cl : t.cr;
+    g.beginPath(); g.arc(rx, (r + 0.5) * T, on ? 7 : 5, 0, 7);
+    g.fillStyle = on ? '#ffffff' : c; g.shadowColor = c; g.shadowBlur = on ? 14 : 0; g.fill(); g.shadowBlur = 0;
+  }
+}
+
+function drawBoard(now) {
+  g.fillStyle = '#0f1623'; g.fillRect(WALL, 0, BW, BH);
+  g.strokeStyle = 'rgba(255,255,255,0.045)'; g.lineWidth = 1; g.beginPath();
+  for (let c = 1; c < COLS; c++) { g.moveTo(WALL + c * T + 0.5, 0); g.lineTo(WALL + c * T + 0.5, BH); }
+  for (let r = 1; r < ROWS; r++) { g.moveTo(WALL, r * T + 0.5); g.lineTo(WALL + BW, r * T + 0.5); }
+  g.stroke();
+
+  if (volt > 0.65) {                            // overload warning
+    g.fillStyle = `rgba(255,50,50,${0.05 + 0.06 * Math.sin(now / 120)})`;
+    g.fillRect(WALL, 0, BW, T * 2);
+  }
+
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const t = grid[r][c];
+    if (t) drawTile(WALL + c * T, t.dy * T, t, T);
+  }
+
+  if (cur && state === 'play') {
+    let gr = cur.row;
+    while (canMove(gr + 1, cur.col)) gr++;
+    if (gr > cur.row) {
+      g.save(); g.setLineDash([4, 4]); g.strokeStyle = 'rgba(255,255,255,0.28)'; g.lineWidth = 1.5;
+      rr(WALL + cur.col * T + 3, gr * T + 3, T - 6, T - 6, 6); g.stroke(); g.restore();
+      drawTile(WALL + cur.col * T, gr * T, cur.tile, T, 0.2);
+    }
+    drawTile(WALL + curX * T, cur.y * T, cur.tile, T);
+  }
+
+  for (const p of particles) {
+    g.globalAlpha = Math.max(0, p.life / p.max); g.fillStyle = p.color;
+    g.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  g.globalAlpha = 1;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const t of texts) {
+    g.globalAlpha = Math.min(1, t.life / 400);
+    g.font = `bold ${t.size}px system-ui`;
+    g.lineWidth = 4; g.strokeStyle = '#000'; g.strokeText(t.text, t.x, t.y);
+    g.fillStyle = t.color; g.fillText(t.text, t.x, t.y);
+  }
+  g.globalAlpha = 1;
+}
+
+function drawPanel(now) {
+  const x = WALL + BW + WALL + 16, w = PANEL - 28;
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  const label = (txt, y) => { g.fillStyle = '#6f7d96'; g.font = '700 11px system-ui'; g.fillText(txt, x, y); };
+  g.fillStyle = '#ffe066'; g.font = '800 20px system-ui'; g.fillText('CIRCUIT DROP', x, 28);
+
+  label('SCORE', 58);
+  g.fillStyle = '#e8eefc'; g.font = '700 26px system-ui'; g.fillText(String(score), x, 86);
+  g.fillStyle = '#6f7d96'; g.font = '12px system-ui'; g.fillText('best ' + best, x, 104);
+
+  label('LEVEL', 130);
+  g.fillStyle = '#6f7d96'; g.font = '700 11px system-ui'; g.fillText('CIRCUITS', x + 66, 130);
+  g.fillStyle = '#e8eefc'; g.font = '700 20px system-ui';
+  g.fillText(String(level), x, 154);
+  g.fillText(String(circuits), x + 66, 154);
+
+  label('NEXT', 184);
+  for (let i = 0; i < queue.length; i++) drawTile(x + (i === 0 ? 0 : 6), 192 + i * 46 + (i ? 6 : 0), queue[i], i === 0 ? 44 : 38, i === 0 ? 1 : 0.7);
+
+  label('HOLD', 352);
+  rr(x, 360, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
+  if (hold) drawTile(x, 360, hold, 52, canHold ? 1 : 0.4);
+
+  label('VOLTAGE', 440);
+  g.fillStyle = '#18202e'; rr(x, 448, w, 16, 4); g.fill();
+  const hue = 130 - 130 * Math.min(1, volt / 0.9);
+  g.fillStyle = `hsl(${hue},85%,55%)`;
+  if (volt > 0.01) { rr(x, 448, Math.max(8, w * volt), 16, 4); g.fill(); }
+
+  label('CHARGE', 486);
+  g.textAlign = 'right'; g.fillStyle = '#3de0d0'; g.font = '700 12px system-ui';
+  g.fillText('⚡'.repeat(charges), x + w, 486); g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(x, 494, w, 14, 4); g.fill();
+  if (charge > 1) {
+    g.globalAlpha = charges > 0 ? 0.75 + 0.25 * Math.sin(now / 150) : 1;
+    g.fillStyle = '#3de0d0'; rr(x, 494, Math.max(8, w * charge / 100), 14, 4); g.fill();
+    g.globalAlpha = 1;
+  }
+  const powers = [['ZAP', topInCol(cur ? cur.col : 0) >= 0], ['UNDO', undoable()], ['CROSS', !!cur]];
+  const bw = (w - 8) / 3;
+  powers.forEach(([name, usable], i) => {
+    const bx = x + i * (bw + 4), ok = charges > 0 && usable;
+    rr(bx, 516, bw, 30, 5);
+    g.fillStyle = ok ? '#12403d' : '#141b27'; g.fill();
+    g.strokeStyle = ok ? '#3de0d0' : '#27344a'; g.lineWidth = 1.5; g.stroke();
+    g.fillStyle = ok ? '#aef5ee' : '#56637a'; g.font = '700 11px system-ui'; g.textAlign = 'center';
+    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 535); g.textAlign = 'left';
+  });
+
+  g.fillStyle = '#6f7d96'; g.font = '11px system-ui';
+  const help = ['← → move   ↑/X rotate   Z back', '↓ soft   Space drop   C hold', '1-3 power   P pause   M mute   R reset'];
+  help.forEach((s, i) => g.fillText(s, x, 572 + i * 17));
+}
+
+function overlay(title, sub1, sub2) {
+  g.fillStyle = 'rgba(8,11,18,0.78)'; g.fillRect(WALL, 0, BW, BH);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#ffe066'; g.font = '800 34px system-ui'; g.fillText(title, WALL + BW / 2, BH / 2 - 46);
+  g.fillStyle = '#e8eefc'; g.font = '16px system-ui'; g.fillText(sub1, WALL + BW / 2, BH / 2 - 4);
+  g.fillStyle = '#9fb0cc'; g.font = '13px system-ui'; g.fillText(sub2, WALL + BW / 2, BH / 2 + 24);
+}
+
+function draw(now) {
+  g.fillStyle = '#0b0f17'; g.fillRect(0, 0, CW, CH);
+  drawWall(0, true);
+  drawWall(WALL + BW, false);
+  drawBoard(now);
+  drawPanel(now);
+  if (state === 'ready') overlay('CIRCUIT DROP', 'Connect + to − to clear the network', 'Press Enter to start');
+  else if (state === 'over') overlay('OVERLOAD', 'Score ' + score + (score >= best ? '  (new best!)' : ''), 'Press Enter to play again');
+  else if (paused) overlay('PAUSED', 'Press P to resume', '');
+}
+
+// ---- Main loop ------------------------------------------------------
+grid = emptyGrid(); queue = []; hold = null; canHold = true;
+score = 0; level = 1; circuits = 0; chain = 0;
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(50, now - last); last = now;
+  if (!paused && state !== 'ready' && state !== 'over') update(dt);
+  else if (state === 'over') { updateFx(dt); animTiles(dt); }
+  draw(now);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
