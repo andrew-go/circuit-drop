@@ -2,11 +2,14 @@
 <html lang="uk">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0f17">
 <title>Circuit Drop</title>
 <style>
-  html,body{margin:0;height:100%;background:#0b0f17;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif}
-  canvas{display:block}
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b0f17;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;touch-action:none;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  canvas{display:block;touch-action:none;-webkit-tap-highlight-color:transparent}
 </style>
 </head>
 <body>
@@ -43,8 +46,27 @@ const TIER_WEIGHT = { 1: 3, 2: 2, 3: 1 };
 const TIER_NAME = { 1: 'ЗВИЧАЙНИЙ', 2: 'НЕЗВИЧАЙНИЙ', 3: 'РІДКІСНИЙ' };
 const TIER_COLOR = { 1: '#8b99b3', 2: '#6db4ff', 3: '#ffb347' };
 
+// ---- Bosses, modifiers and heat -------------------------------------
+const RISE_EVERY = 10;                        // pieces between rising insulator rows
+const RISE_GAPS = 2;                          // empty cells left in each risen row
+const DEAD_ROWS = 3, DEAD_ROW_FROM = 4;       // dead rows are picked among rows DEAD_ROW_FROM..ROWS-1
+const DRIFT_MS = 2400;                        // how often a falling tile may get nudged sideways
+const HEAT_MAX = 3, HEAT_GOAL = 0.15, HEAT_SPARKS = 0.15, HEAT_FROM_STAGE = 5;
+const MODS = {
+  rising:   { icon: '\u{1F9F1}',         name: 'Підйом ізоляторів', desc: 'Кожні 10 плиток знизу випирає ряд ізоляторів. Не дайте стопці дійти до верху.' },
+  blind:    { icon: '\u{1F576}\uFE0F',  name: 'Затемнення',        desc: 'Наступні плитки приховані. Спирайтеся на запас.' },
+  deadrows: { icon: '\u26D4',            name: 'Мертві ряди',       desc: '3 ряди не підключаються до стін (вони затемнені). Шукайте обхід.' },
+  drift:    { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             desc: 'Падаюча плитка час від часу зсувається вбік.' },
+};
+const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
+const BOSSES = {
+  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'],                      needChain: 2 },
+  6: { name: 'ЗАТЕМНЕННЯ',        mods: ['blind', 'deadrows'] },
+  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2 },
+};
+
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
-const pInsulator   = () => Math.min(0.3, (0.03 + 0.018 * (level - 1)) * (pk('clean') ? 0.5 : 1) + (level === STAGES ? 0.1 : 0));
+const pInsulator   = () => Math.min(0.3, (0.03 + 0.018 * (level - 1)) * (pk('clean') ? 0.5 : 1));
 const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
 const pBomb        = () => 0.03 * (pk('demo') ? 2.5 : 1);
 const maxCharges   = () => BASE_CHARGES + pk('bank');
@@ -83,7 +105,17 @@ const PERKS = [
 
 // ---- Constants derived from the above -------------------------------
 const BW = COLS * T, BH = ROWS * T;
-const CW = WALL + BW + WALL + PANEL, CH = BH;
+const HUD_H = 140, CTRL_H = 204;         // phone (portrait) layout: HUD above the board, touch controls below
+const TOUCH = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || 'ontouchstart' in window;
+let CW = WALL + BW + WALL + PANEL, CH = BH, portrait = false, boardY = 0;
+// Prompts differ between touch and keyboard
+const T_START  = TOUCH ? 'Торкніться екрана — почати' : 'Enter або клік — почати';
+const T_NEW    = TOUCH ? 'Торкніться екрана — новий забіг' : 'Enter або клік — новий забіг';
+const T_CONT   = TOUCH ? 'Торкніться, щоб продовжити' : 'Натисніть Enter або клацніть, щоб продовжити';
+const T_RESUME = TOUCH ? 'Торкніться, щоб продовжити' : 'Натисніть P, щоб продовжити';
+const T_CLOSE  = TOUCH ? 'Торкніться, щоб закрити' : 'Натисніть I, щоб закрити';
+const T_HEAT   = TOUCH ? 'торкайтеся стрілок, щоб змінити нагрів' : '\u2190 \u2192 або 0\u20133 \u2014 змінити нагрів';
+const kb = n => TOUCH ? '' : '[' + n + '] ';
 const UP = 1, RIGHT = 2, DOWN = 4, LEFT = 8;
 const DIRS = [
   { bit: UP,    dr: -1, dc: 0 },
@@ -100,14 +132,23 @@ const EMOJI = '"Segoe UI Emoji","Apple Color Emoji",system-ui,sans-serif';
 const canvas = document.getElementById('c');
 const g = canvas.getContext('2d');
 const dpr = Math.min(2, window.devicePixelRatio || 1);
-canvas.width = CW * dpr; canvas.height = CH * dpr;
-g.scale(dpr, dpr);
-function fit() {                                  // keep aspect ratio, fill the window
-  const k = Math.min(innerWidth / CW, innerHeight * 0.97 / CH, 1.5);
+// Landscape desktops get the side-panel layout; phones, tablets and tall windows get the portrait layout.
+let layoutW = -1, layoutH = -1;
+function setLayout() {
+  layoutW = innerWidth; layoutH = innerHeight;
+  portrait = TOUCH || innerHeight > innerWidth * 1.05;
+  CW = portrait ? WALL * 2 + BW : WALL + BW + WALL + PANEL;
+  CH = portrait ? HUD_H + BH + CTRL_H : BH;
+  boardY = portrait ? HUD_H : 0;
+  canvas.width = CW * dpr; canvas.height = CH * dpr;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const k = Math.min(innerWidth / CW, innerHeight * (portrait ? 1 : 0.97) / CH, portrait ? 1.6 : 1.5);
   canvas.style.width = Math.floor(CW * k) + 'px';
   canvas.style.height = Math.floor(CH * k) + 'px';
 }
-addEventListener('resize', fit); fit();
+addEventListener('resize', setLayout); addEventListener('orientationchange', setLayout);
+setLayout();
+canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 // ---- Sound (tiny WebAudio beeps) ------------------------------------
 let actx = null, muted = false;
@@ -115,6 +156,7 @@ function beep(f, d = 0.08, type = 'square', v = 0.035, slide = 0) {
   if (muted) return;
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
     const t0 = actx.currentTime, o = actx.createOscillator(), a = actx.createGain();
     o.type = type;
     o.frequency.setValueAtTime(f, t0);
@@ -133,14 +175,38 @@ let paused = false, showPerks = false;
 let gravAcc = 0, lockAcc = 0, curX = 0, clearing = null;
 let particles = [], texts = [], wallGlow = 0, volt = 0, best = 0;
 let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked power-ups, undo target
-let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [];
+let heat = 0;                   // chosen on the title / result screens (0..HEAT_MAX)
+try { heat = Math.max(0, Math.min(HEAT_MAX, +localStorage.getItem('circuitDropHeat') || 0)); } catch (e) {}
+let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [], menuHits = [];
+let stageMaxChain = 0, chainWarned = false, driftAcc = 0;
 try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
 
 function freshRun() {
-  return { stage: 1, fuses: START_FUSES, maxFuses: START_FUSES, sparks: 0, perks: {}, netUsed: false, repairs: 0 };
+  return { stage: 1, fuses: START_FUSES, maxFuses: START_FUSES, sparks: 0, perks: {}, netUsed: false, repairs: 0,
+           heat, plan: {}, mods: [], deadRows: [], sinceRise: 0 };
 }
 function pk(id) { return (run && run.perks[id]) || 0; }
-const goal = () => GOALS[run.stage - 1];
+const goalFor = s => Math.round(GOALS[s - 1] * (1 + HEAT_GOAL * run.heat) / 10) * 10;
+const goal = () => goalFor(run.stage);
+const sparkMul = () => 1 - HEAT_SPARKS * run.heat;
+const chainNeed = () => (BOSSES[run.stage] && BOSSES[run.stage].needChain) || 0;
+const hasMod = id => run.mods.includes(id);
+const isDead = r => run.deadRows.includes(r);
+// Modifiers of a stage: the boss's own, plus `heat` extra ones from stage 5 on. Rolled once, then remembered.
+function modsFor(stage) {
+  if (run.plan[stage]) return run.plan[stage];
+  const mods = (BOSSES[stage] ? BOSSES[stage].mods : []).slice();
+  if (run.heat > 0 && stage >= HEAT_FROM_STAGE) {
+    const pool = HEAT_POOL.filter(m => !mods.includes(m));
+    for (let n = run.heat; n > 0 && pool.length; n--) mods.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
+  }
+  return (run.plan[stage] = mods);
+}
+function setHeat(h) {
+  heat = Math.max(0, Math.min(HEAT_MAX, h));
+  try { localStorage.setItem('circuitDropHeat', heat); } catch (e) {}
+  beep(400 + heat * 90, 0.06, 'square', 0.03);
+}
 const addScore = n => { score += n; stageScore += n; };
 
 function emptyGrid() { return Array.from({ length: ROWS }, () => Array(COLS).fill(null)); }
@@ -174,19 +240,54 @@ function newRun() {
   startStage();
 }
 function startStage() {
-  grid = emptyGrid(); chain = 0; clearing = null; lastLock = null; shop = null; summary = null;
+  grid = emptyGrid(); chain = 0; chainTiles = 0; clearing = null; lastLock = null; shop = null; summary = null;
   particles = []; texts = []; paused = false; volt = 0;
-  stageScore = 0; run.netUsed = false; level = run.stage;
+  stageScore = 0; stageMaxChain = 0; chainWarned = false; driftAcc = 0;
+  run.netUsed = false; level = run.stage; run.sinceRise = 0;
+  run.mods = modsFor(run.stage);
+  run.deadRows = [];
+  if (hasMod('deadrows')) {
+    const rows = [];
+    for (let r = DEAD_ROW_FROM; r < ROWS; r++) rows.push(r);
+    while (run.deadRows.length < DEAD_ROWS) run.deadRows.push(rows.splice((Math.random() * rows.length) | 0, 1)[0]);
+    run.deadRows.sort((a, b) => a - b);
+  }
   while (queue.length < 3) queue.push(makeNext());
-  spawn();
-  const boss = run.stage === STAGES;
-  popText(boss ? 'ФІНАЛЬНИЙ ЕТАП' : 'ЕТАП ' + run.stage, WALL + BW / 2, BH / 2 - 30, boss ? '#ff6a5a' : '#ffe066', 28);
+  if (run.mods.length || chainNeed()) { state = 'briefing'; return; }   // read the rules, then Enter
+  popText('ЕТАП ' + run.stage, WALL + BW / 2, BH / 2 - 30, '#ffe066', 28);
   popText('ціль ' + goal(), WALL + BW / 2, BH / 2 + 6, '#e8eefc', 18);
+  spawn();
 }
+function beginStage() { spawn(); }
 function spawn() {
   canHold = true;
+  if (hasMod('rising') && run.sinceRise >= RISE_EVERY) { run.sinceRise = 0; risePush(); return; }
+  run.sinceRise++;
   startPiece(queue.shift());
   queue.push(makeNext());
+}
+// Rising insulators: push everything up one row and add an insulator row (with a few gaps) at the bottom.
+function risePush() {
+  if (grid[0].some(Boolean)) {                  // the stack would be pushed out of the top
+    overload();
+    if (state === 'over') return;
+  }
+  for (let r = 0; r < ROWS - 1; r++) for (let c = 0; c < COLS; c++) {
+    const t = grid[r + 1][c];
+    grid[r][c] = t;
+    if (t) t.dy = r + 1;                        // animates upward
+  }
+  const gaps = new Set();
+  while (gaps.size < RISE_GAPS) gaps.add((Math.random() * COLS) | 0);
+  for (let c = 0; c < COLS; c++) {
+    const t = gaps.has(c) ? null : newTile('ins', 0);
+    if (t) t.dy = ROWS;
+    grid[ROWS - 1][c] = t;
+  }
+  applyGravity();
+  popText('ПІДЙОМ ІЗОЛЯТОРІВ', WALL + BW / 2, BH / 2, '#ff9b5a', 20);
+  beep(120, 0.35, 'sawtooth', 0.05, 60);
+  state = 'settling';
 }
 function startPiece(t) {
   cur = { tile: t, col: COLS >> 1, row: 0, y: -1 };
@@ -215,7 +316,7 @@ function gameOver() {
 }
 function winStage() {
   state = 'stagewin'; winT = 0;
-  const reward = STAGE_BONUS + STAGE_BONUS_PER * run.stage;
+  const reward = Math.round((STAGE_BONUS + STAGE_BONUS_PER * run.stage) * sparkMul());
   const interest = pk('interest') ? Math.min(4, Math.floor(run.sparks / 5)) : 0;
   run.sparks += reward + interest;
   summary = { reward, interest };
@@ -285,7 +386,7 @@ function flood(fromLeft) {
     const c0 = fromLeft ? k : COLS - 1 - k;
     for (let r = 0; r < ROWS; r++) {
       const t = grid[r][c0];
-      if (t && (t.mask & bit)) { dist.set(r * COLS + c0, 0); q.push([r, c0]); }
+      if (t && (t.mask & bit) && !isDead(r)) { dist.set(r * COLS + c0, 0); q.push([r, c0]); }
     }
   }
   for (let i = 0; i < q.length; i++) {
@@ -324,7 +425,7 @@ function lockPiece() {
     for (const D of DIRS) {
       if (!(tile.mask & D.bit)) continue;
       const nr = row + D.dr, nc = col + D.dc;
-      if (!inRange(nr, nc)) { if (D.bit === LEFT || D.bit === RIGHT) links++; continue; }
+      if (!inRange(nr, nc)) { if ((D.bit === LEFT || D.bit === RIGHT) && !isDead(row)) links++; continue; }
       const n = grid[nr][nc];
       if (n && (n.mask & opp(D.bit))) links++;
     }
@@ -350,7 +451,7 @@ function resolve() {
   let closed = false;
   for (const k of L.keys()) {
     const r = (k / COLS) | 0, c = k % COLS;
-    if (c >= COLS - wallReach() && (grid[r][c].mask & RIGHT)) { closed = true; break; }
+    if (c >= COLS - wallReach() && (grid[r][c].mask & RIGHT) && !isDead(r)) { closed = true; break; }
   }
   if (closed) {
     const cells = [];
@@ -365,7 +466,13 @@ function resolve() {
     beep(880, 0.4, 'sine', 0.06, 440);
   }
   chain = 0;
-  if (stageScore >= goal()) { winStage(); return; }
+  if (stageScore >= goal()) {
+    if (stageMaxChain >= chainNeed()) { winStage(); return; }
+    if (!chainWarned) {                         // score is there, but the boss wants a chain too
+      chainWarned = true;
+      popText('Потрібен ланцюжок ×' + chainNeed() + '!', WALL + BW / 2, BH / 2, '#ff9bd0', 20);
+    }
+  }
   spawn();
 }
 
@@ -419,6 +526,7 @@ function usePower(i) {
 
 function startClear(cells, kind) {
   chain++; lastLock = null;
+  stageMaxChain = Math.max(stageMaxChain, chain);
   chainTiles += cells.length;
   if (kind === 'circuit') addCharge(CHARGE_PER_CIRCUIT * chain);
   let maxD = 0, special = 0, resistors = 0, sx = 0, sy = 0;
@@ -444,7 +552,7 @@ function startClear(cells, kind) {
   popText('+' + pts, px, py, '#ffe066', 20);
   if (chain > 1) popText('ЛАНЦЮЖОК ×' + chain, px, py + 24, '#ff9bd0', 16);
   if (kind === 'circuit') {
-    const sp = SPARKS_PER_CIRCUIT + pk('prospect') + (chain - 1);
+    const sp = Math.max(1, Math.round((SPARKS_PER_CIRCUIT + pk('prospect') + (chain - 1)) * sparkMul()));
     run.sparks += sp;
     popText('+' + sp + ' ◆', px, py - 24, '#7fd6ff', 14);
   }
@@ -510,6 +618,7 @@ function animTiles(dt) {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
     const t = grid[r][c];
     if (t && t.dy < r) { t.dy = Math.min(r, t.dy + SETTLE_SPEED * dt); moving = true; }
+    else if (t && t.dy > r) { t.dy = Math.max(r, t.dy - SETTLE_SPEED * dt); moving = true; }   // rising rows
   }
   return moving;
 }
@@ -534,6 +643,14 @@ function updateFx(dt) {
 const keys = new Set();
 function updatePlay(dt) {
   if (!cur) return;
+  if (hasMod('drift')) {                        // Drift: the falling tile gets nudged sideways now and then
+    driftAcc += dt;
+    if (driftAcc >= DRIFT_MS) {
+      driftAcc = 0;
+      const d = Math.random() < 0.5 ? -1 : 1;
+      if (canMove(cur.row, cur.col + d)) cur.col += d;
+    }
+  }
   const down = keys.has('ArrowDown') || keys.has('KeyS');
   const interval = down ? Math.min(45, fallInterval()) : fallInterval();
   if (canMove(cur.row + 1, cur.col)) {
@@ -562,14 +679,30 @@ function update(dt) {
 }
 
 // ---- Input ----------------------------------------------------------
+const playing = () => state === 'play' && cur && !paused;
+function actMove(d) { if (playing() && canMove(cur.row, cur.col + d)) { cur.col += d; beep(300, 0.03, 'square', 0.02); } }
+function actRotate(cw) { if (playing()) { cur.tile.mask = cw ? rotCW(cur.tile.mask) : rotCCW(cur.tile.mask); beep(cw ? 520 : 480, 0.04, 'square', 0.025); } }
+function actDrop() { if (!playing()) return; while (canMove(cur.row + 1, cur.col)) cur.row++; lockPiece(); }
+function actHold() {
+  if (!playing() || !canHold) return;
+  const t = cur.tile;
+  canHold = !!pk('swap');
+  if (hold) { const h = hold; hold = t; startPiece(h); }
+  else { hold = t; startPiece(queue.shift()); queue.push(makeNext()); }
+  beep(420, 0.06, 'triangle', 0.04, 200);
+}
 addEventListener('keydown', e => {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
   if (e.code === 'KeyM') { muted = !muted; return; }
   if (state === 'ready' || state === 'over' || state === 'victory') {
     if (e.code === 'Enter') newRun();           // Enter only, so a mashed Space can't skip the result screen
+    else if (e.code === 'ArrowLeft') setHeat(heat - 1);
+    else if (e.code === 'ArrowRight') setHeat(heat + 1);
+    else if (/^Digit[0-3]$/.test(e.code)) setHeat(+e.code.slice(5));
     return;
   }
+  if (state === 'briefing') { if (e.code === 'Enter') beginStage(); return; }
   if (state === 'shop') {
     if (e.code === 'Digit1' || e.code === 'Numpad1') buyOffer(0);
     else if (e.code === 'Digit2' || e.code === 'Numpad2') buyOffer(1);
@@ -582,41 +715,100 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyP' || e.code === 'Escape') { paused = !paused; showPerks = false; return; }
   if (e.code === 'KeyI') { showPerks = !showPerks; paused = showPerks; return; }
   if (paused || state !== 'play' || !cur) return;
-  const t = cur.tile;
   switch (e.code) {
-    case 'ArrowLeft': case 'KeyA':
-      if (canMove(cur.row, cur.col - 1)) { cur.col--; beep(300, 0.03, 'square', 0.02); } break;
-    case 'ArrowRight': case 'KeyD':
-      if (canMove(cur.row, cur.col + 1)) { cur.col++; beep(300, 0.03, 'square', 0.02); } break;
-    case 'ArrowUp': case 'KeyW': case 'KeyX':
-      t.mask = rotCW(t.mask); beep(520, 0.04, 'square', 0.025); break;
-    case 'KeyZ':
-      t.mask = rotCCW(t.mask); beep(480, 0.04, 'square', 0.025); break;
-    case 'Space':
-      while (canMove(cur.row + 1, cur.col)) cur.row++;
-      lockPiece(); break;
+    case 'ArrowLeft': case 'KeyA': actMove(-1); break;
+    case 'ArrowRight': case 'KeyD': actMove(1); break;
+    case 'ArrowUp': case 'KeyW': case 'KeyX': actRotate(true); break;
+    case 'KeyZ': actRotate(false); break;
+    case 'Space': actDrop(); break;
     case 'Digit1': case 'Numpad1': usePower(0); break;
     case 'Digit2': case 'Numpad2': usePower(1); break;
     case 'Digit3': case 'Numpad3': usePower(2); break;
-    case 'KeyC': case 'ShiftLeft': case 'ShiftRight':
-      if (!canHold) break;
-      canHold = !!pk('swap');
-      if (hold) { const h = hold; hold = t; startPiece(h); }
-      else { hold = t; startPiece(queue.shift()); queue.push(makeNext()); }
-      beep(420, 0.06, 'triangle', 0.04, 200);
-      break;
+    case 'KeyC': case 'ShiftLeft': case 'ShiftRight': actHold(); break;
   }
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
 canvas.addEventListener('click', e => {
   const r = canvas.getBoundingClientRect();
-  const x = (e.clientX - r.left) * CW / r.width, y = (e.clientY - r.top) * CH / r.height;
-  if (state === 'ready' || state === 'over' || state === 'victory') { newRun(); return; }
+  const x = (e.clientX - r.left) * CW / r.width, y = (e.clientY - r.top) * CH / r.height - boardY;   // board coordinates
+  if (state === 'ready' || state === 'over' || state === 'victory') {
+    for (const h of menuHits) if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); return; }
+    newRun(); return;
+  }
+  if (state === 'briefing') { beginStage(); return; }
   if (state === 'shop') for (const h of shopHits) {
     if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); break; }
   }
 });
+
+// ---- Touch controls (portrait layout) ---------------------------------
+// Buttons live in uiHits (canvas coordinates, rebuilt every frame). On the board: drag = move,
+// tap = rotate, swipe down = hard drop.
+let uiHits = [];
+const press = { id: null, hit: null, timer: null, iv: null, sx: 0, sy: 0, ax: 0, st: 0, moved: false };
+function canvasPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * CW / r.width, y: (e.clientY - r.top) * CH / r.height };
+}
+function stopPress() {
+  clearTimeout(press.timer); clearInterval(press.iv); press.timer = press.iv = null;
+  keys.delete('ArrowDown'); press.id = null; press.hit = null;
+}
+function runButton(id) {
+  switch (id) {
+    case 'left': actMove(-1); break;
+    case 'right': actMove(1); break;
+    case 'rot': actRotate(true); break;
+    case 'drop': actDrop(); break;
+    case 'hold': actHold(); break;
+    case 'p0': usePower(0); break;
+    case 'p1': usePower(1); break;
+    case 'p2': usePower(2); break;
+    case 'pause': paused = !paused; showPerks = false; break;
+    case 'perks': showPerks = !showPerks; paused = showPerks; break;
+    case 'mute': muted = !muted; break;
+  }
+}
+canvas.addEventListener('pointerdown', e => {
+  if (actx && actx.state === 'suspended') actx.resume();
+  if (!portrait) return;
+  const { x, y } = canvasPos(e);
+  if (paused) { paused = false; showPerks = false; return; }          // tap anywhere resumes
+  for (const h of uiHits) {
+    if (x < h.x || x > h.x + h.w || y < h.y || y > h.y + h.h) continue;
+    stopPress(); press.id = e.pointerId; press.hit = h.id;
+    if (h.id === 'soft') keys.add('ArrowDown');
+    else {
+      runButton(h.id);
+      if (h.id === 'left' || h.id === 'right') press.timer = setTimeout(() => { press.iv = setInterval(() => runButton(h.id), 80); }, 220);
+    }
+    return;
+  }
+  if (state === 'play' && y >= boardY && y < boardY + BH) {
+    stopPress(); press.id = e.pointerId; press.hit = 'board';
+    press.sx = press.ax = x; press.sy = y; press.st = performance.now(); press.moved = false;
+  }
+});
+addEventListener('pointermove', e => {
+  if (press.id !== e.pointerId || press.hit !== 'board') return;
+  const { x } = canvasPos(e), step = T * 0.85;
+  while (Math.abs(x - press.ax) >= step) {
+    const d = Math.sign(x - press.ax);
+    actMove(d); press.ax += d * step; press.moved = true;
+  }
+});
+function endPress(e) {
+  if (press.id !== e.pointerId) return;
+  if (press.hit === 'board' && e.type === 'pointerup') {
+    const { x, y } = canvasPos(e), dt = performance.now() - press.st, dx = x - press.sx, dy = y - press.sy;
+    if (!press.moved && Math.hypot(dx, dy) < 14 && dt < 350) actRotate(true);        // tap
+    else if (dy > 90 && Math.abs(dx) < 70 && dt < 500) actDrop();                    // swipe down
+  }
+  stopPress();
+}
+addEventListener('pointerup', endPress);
+addEventListener('pointercancel', endPress);
 
 // ---- Rendering ------------------------------------------------------
 function rr(x, y, w, h, r) {
@@ -695,7 +887,7 @@ function drawWall(x0, left) {
   const gr = g.createLinearGradient(x0, 0, x0 + WALL, 0);
   gr.addColorStop(left ? 0 : 1, left ? '#2a1114' : '#0f1d33');
   gr.addColorStop(left ? 1 : 0, '#0b0f17');
-  g.fillStyle = gr; g.fillRect(x0, 0, WALL, CH);
+  g.fillStyle = gr; g.fillRect(x0, 0, WALL, BH);
 
   g.save();                                     // coil
   g.strokeStyle = c; g.lineWidth = 3.5; g.lineJoin = 'round';
@@ -703,20 +895,28 @@ function drawWall(x0, left) {
   g.beginPath();
   const a = x0 + 10, b = x0 + WALL - 14;
   let i = 0;
-  for (let y = 48; y <= CH - 48; y += 20, i++) { const x = i % 2 ? a : b; if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
+  for (let y = 48; y <= BH - 48; y += 20, i++) { const x = i % 2 ? a : b; if (i === 0) g.moveTo(x, y); else g.lineTo(x, y); }
   g.stroke();
   g.restore();
 
   const rx = left ? x0 + WALL - 2 : x0 + 2;     // rail facing the board
-  g.fillStyle = c; g.globalAlpha = 0.85; g.fillRect(rx - 1.5, 0, 3, CH); g.globalAlpha = 1;
+  g.fillStyle = c; g.globalAlpha = 0.85; g.fillRect(rx - 1.5, 0, 3, BH); g.globalAlpha = 1;
+  for (const r of run.deadRows) {               // dead rows: the wall is insulated here
+    g.save();
+    g.beginPath(); g.rect(x0, r * T, WALL, T); g.clip();
+    g.fillStyle = '#0b0f17'; g.fillRect(x0, r * T, WALL, T);
+    g.strokeStyle = '#5a6270'; g.lineWidth = 3;
+    for (let i = -T; i < WALL + T; i += 10) { g.beginPath(); g.moveTo(x0 + i, r * T); g.lineTo(x0 + i + T, r * T + T); g.stroke(); }
+    g.restore();
+  }
   g.font = 'bold 32px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillText(left ? '+' : '−', x0 + WALL / 2, 24);
-  g.fillText(left ? '+' : '−', x0 + WALL / 2, CH - 24);
+  g.fillText(left ? '+' : '−', x0 + WALL / 2, BH - 24);
 
   const c0 = left ? 0 : COLS - 1, bit = left ? LEFT : RIGHT;   // contact nodes
   for (let r = 0; r < ROWS; r++) {
     const t = grid[r][c0];
-    if (!t || !(t.mask & bit)) continue;
+    if (!t || !(t.mask & bit) || isDead(r)) continue;
     const on = left ? t.cl : t.cr;
     g.beginPath(); g.arc(rx, (r + 0.5) * T, on ? 7 : 5, 0, 7);
     g.fillStyle = on ? '#ffffff' : c; g.shadowColor = c; g.shadowBlur = on ? 14 : 0; g.fill(); g.shadowBlur = 0;
@@ -730,6 +930,9 @@ function drawBoard(now) {
   for (let r = 1; r < ROWS; r++) { g.moveTo(WALL, r * T + 0.5); g.lineTo(WALL + BW, r * T + 0.5); }
   g.stroke();
 
+  for (const r of run.deadRows) {               // dead rows are tinted across the whole board
+    g.fillStyle = 'rgba(255,70,70,0.07)'; g.fillRect(WALL, r * T, BW, T);
+  }
   if (volt > 0.65) {                            // overload warning
     g.fillStyle = `rgba(255,50,50,${0.05 + 0.06 * Math.sin(now / 120)})`;
     g.fillRect(WALL, 0, BW, T * 2);
@@ -778,6 +981,7 @@ function drawFuses(x, y) {
 function drawHeader() {
   g.textAlign = 'left'; g.textBaseline = 'alphabetic';
   g.fillStyle = '#ffe066'; g.font = '800 20px system-ui'; g.fillText('CIRCUIT DROP', PX, 28);
+  if (run.heat) { g.textAlign = 'right'; g.fillStyle = '#ff8a3d'; g.font = `700 12px ${EMOJI}`; g.fillText('\u{1F525} ' + run.heat, PX + PW, 28); g.textAlign = 'left'; }
   lab('РАХУНОК', PX, 54);
   g.fillStyle = '#e8eefc'; g.font = '700 24px system-ui'; g.fillText(String(score), PX, 80);
   g.textAlign = 'right'; g.fillStyle = '#6f7d96'; g.font = '11px system-ui'; g.fillText('рекорд ' + best, PX + PW, 80); g.textAlign = 'left';
@@ -809,42 +1013,63 @@ function drawPanel(now) {
   const gp = Math.min(1, stageScore / goal());
   if (gp > 0.01) { g.fillStyle = gp >= 1 ? '#7dffb0' : '#ffe066'; rr(x, 162, Math.max(8, w * gp), 12, 4); g.fill(); }
 
-  lab('ДАЛІ', x, 198);
-  for (let i = 0; i < queue.length; i++) drawTile(x + (i === 0 ? 0 : 6), 206 + i * 46 + (i ? 6 : 0), queue[i], i === 0 ? 44 : 38, i === 0 ? 1 : 0.7);
+  // active modifiers (rising shows how many pieces are left until the next push) and the boss's chain requirement
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  let mx = x;
+  for (const id of run.mods) {
+    g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 194); mx += 20;
+    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, RISE_EVERY - run.sinceRise)), mx, 194); mx += 16; }
+  }
+  if (chainNeed()) {
+    const ok = stageMaxChain >= chainNeed();
+    g.textAlign = 'right'; g.font = '700 11px system-ui'; g.fillStyle = ok ? '#7dffb0' : '#ff9bd0';
+    g.fillText('ЛАНЦЮЖОК ×' + chainNeed() + (ok ? ' \u2713' : ''), x + w, 194); g.textAlign = 'left';
+  }
 
-  lab('ЗАПАС', x, 364);
-  rr(x, 372, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
-  if (hold) drawTile(x, 372, hold, 52, canHold ? 1 : 0.4);
+  lab('ДАЛІ', x, 216);
+  for (let i = 0; i < queue.length; i++) {
+    const s = i === 0 ? 44 : 38, tx = x + (i === 0 ? 0 : 6), ty = 224 + i * 46 + (i ? 6 : 0);
+    if (hasMod('blind')) {                      // Blackout: the preview is hidden
+      rr(tx + 2, ty + 2, s - 4, s - 4, 6); g.fillStyle = '#10151f'; g.fill();
+      g.strokeStyle = '#27344a'; g.lineWidth = 1.5; g.stroke();
+      g.fillStyle = '#56637a'; g.font = '700 18px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('?', tx + s / 2, ty + s / 2 + 1); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+    } else drawTile(tx, ty, queue[i], s, i === 0 ? 1 : 0.7);
+  }
 
-  lab('НАПРУГА', x, 444);
-  g.fillStyle = '#18202e'; rr(x, 452, w, 16, 4); g.fill();
+  lab('ЗАПАС', x, 380);
+  rr(x, 388, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
+  if (hold) drawTile(x, 388, hold, 52, canHold ? 1 : 0.4);
+
+  lab('НАПРУГА', x, 458);
+  g.fillStyle = '#18202e'; rr(x, 466, w, 16, 4); g.fill();
   const hue = 130 - 130 * Math.min(1, volt / 0.9);
   g.fillStyle = `hsl(${hue},85%,55%)`;
-  if (volt > 0.01) { rr(x, 452, Math.max(8, w * volt), 16, 4); g.fill(); }
+  if (volt > 0.01) { rr(x, 466, Math.max(8, w * volt), 16, 4); g.fill(); }
 
-  lab('ЗАРЯД', x, 488);
+  lab('ЗАРЯД', x, 500);
   g.textAlign = 'right'; g.fillStyle = '#3de0d0'; g.font = `700 12px ${EMOJI}`;
-  g.fillText('⚡'.repeat(charges), x + w, 488); g.textAlign = 'left';
-  g.fillStyle = '#18202e'; rr(x, 496, w, 14, 4); g.fill();
+  g.fillText('⚡'.repeat(charges), x + w, 500); g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(x, 508, w, 14, 4); g.fill();
   if (charge > 1) {
     g.globalAlpha = charges > 0 ? 0.75 + 0.25 * Math.sin(now / 150) : 1;
-    g.fillStyle = '#3de0d0'; rr(x, 496, Math.max(8, w * charge / 100), 14, 4); g.fill();
+    g.fillStyle = '#3de0d0'; rr(x, 508, Math.max(8, w * charge / 100), 14, 4); g.fill();
     g.globalAlpha = 1;
   }
   const powers = [['УДАР', topInCol(cur ? cur.col : 0) >= 0], ['НАЗАД', undoable()], ['ХРЕСТ', !!cur]];
   const bw = (w - 8) / 3;
   powers.forEach(([name, usable], i) => {
     const bx = x + i * (bw + 4), ok = charges > 0 && usable;
-    rr(bx, 520, bw, 28, 5);
+    rr(bx, 530, bw, 28, 5);
     g.fillStyle = ok ? '#12403d' : '#141b27'; g.fill();
     g.strokeStyle = ok ? '#3de0d0' : '#27344a'; g.lineWidth = 1.5; g.stroke();
     g.fillStyle = ok ? '#aef5ee' : '#56637a'; g.font = '700 11px system-ui'; g.textAlign = 'center';
-    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 538); g.textAlign = 'left';
+    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 548); g.textAlign = 'left';
   });
 
   g.fillStyle = '#6f7d96'; g.font = '11px system-ui';
   const help = ['← → рух  ↑/X поворот  Z назад', '↓ вниз  Пробіл скинути  C запас', '1-3 сила  I перки  P пауза  M звук'];
-  help.forEach((s, i) => g.fillText(s, x, 572 + i * 17));
+  help.forEach((s, i) => g.fillText(s, x, 578 + i * 17));
 }
 
 function drawShopPanel() {
@@ -872,7 +1097,7 @@ function drawShop() {
     g.lineWidth = 2; g.strokeStyle = o.sold ? '#1f2a3b' : afford ? TIER_COLOR[o.perk.tier] : '#2a3446'; g.stroke();
     g.globalAlpha = o.sold ? 0.35 : 1;
     g.textAlign = 'center'; g.font = `32px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(o.perk.icon, x0 + 38, y + 40);
-    g.font = '700 11px system-ui'; g.fillStyle = '#56637a'; g.fillText('[' + (i + 1) + ']', x0 + 38, y + 80);
+    g.font = '700 11px system-ui'; g.fillStyle = '#56637a'; g.fillText(kb(i + 1).trim(), x0 + 38, y + 80);
     g.textAlign = 'left'; g.font = '700 17px system-ui'; g.fillStyle = '#e8eefc'; g.fillText(o.perk.name, x0 + 76, y + 26);
     g.font = '12.5px system-ui'; g.fillStyle = '#9fb0cc';
     wrap(o.perk.desc, w - 96).forEach((ln, j) => g.fillText(ln, x0 + 76, y + 50 + j * 17));
@@ -894,20 +1119,22 @@ function drawShop() {
     shopHits.push({ x, y, w: bw_, h, fn });
   };
   const full = run.fuses >= run.maxFuses;
-  button(x0, by, bw, 48, '[4] Полагодити', full ? 'усі цілі' : 'запобіжник  ◆ ' + repairCost(), !full && run.sparks >= repairCost(), buyRepair);
-  button(x0 + bw + 12, by, bw, 48, '[5] Оновити', 'пропозиції  ◆ ' + rerollCost(), run.sparks >= rerollCost(), rerollShop);
+  button(x0, by, bw, 48, kb(4) + 'Полагодити', full ? 'усі цілі' : 'запобіжник  ◆ ' + repairCost(), !full && run.sparks >= repairCost(), buyRepair);
+  button(x0 + bw + 12, by, bw, 48, kb(5) + 'Оновити', 'пропозиції  ◆ ' + rerollCost(), run.sparks >= rerollCost(), rerollShop);
 
-  const ny = by + 60, boss = run.stage + 1 === STAGES;
-  rr(x0, ny, w, 52, 10);
-  g.fillStyle = boss ? '#3a1a1a' : '#1d3a2a'; g.fill();
-  g.lineWidth = 2; g.strokeStyle = boss ? '#ff6a5a' : '#7dffb0'; g.stroke();
-  g.textAlign = 'center'; g.fillStyle = '#e8eefc'; g.font = '800 16px system-ui';
-  g.fillText((boss ? 'ФІНАЛЬНИЙ ЕТАП' : 'ЕТАП ' + (run.stage + 1)) + '  •  ціль ' + GOALS[run.stage], cx, ny + 19);
-  g.fillStyle = '#9fb0cc'; g.font = '12px system-ui';
-  g.fillText(boss ? 'Ізолятори множаться. Enter або клік.' : 'Натисніть Enter або клацніть, щоб продовжити', cx, ny + 38);
-  shopHits.push({ x: x0, y: ny, w, h: 52, fn: nextStage });
+  const ny = by + 60, ns = run.stage + 1, bs = BOSSES[ns], nm = modsFor(ns);
+  rr(x0, ny, w, 64, 10);
+  g.fillStyle = bs ? '#3a1a1a' : '#1d3a2a'; g.fill();
+  g.lineWidth = 2; g.strokeStyle = bs ? '#ff6a5a' : '#7dffb0'; g.stroke();
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#e8eefc';
+  fitText(bs ? (ns === STAGES ? 'ФІНАЛ: ' : 'БОС: ') + bs.name : 'ЕТАП ' + ns, cx, ny + 17, w - 16, 15, '800');
+  g.fillStyle = '#c3cfe6';
+  fitText('ціль ' + goalFor(ns) + (bs && bs.needChain ? '  \u2022  потрібен ланцюжок \u00d7' + bs.needChain : ''), cx, ny + 35, w - 16, 12);
+  g.fillStyle = nm.length ? '#ffb347' : '#9fb0cc';
+  fitText(nm.length ? nm.map(id => MODS[id].icon + ' ' + MODS[id].name).join('   ') : T_CONT, cx, ny + 52, w - 16, 11);
+  shopHits.push({ x: x0, y: ny, w, h: 64, fn: nextStage });
 
-  if (shop.msg) { g.fillStyle = shop.ok ? '#7dffb0' : '#ff8a8a'; g.font = '13px system-ui'; g.fillText(shop.msg, cx, ny + 70); }
+  if (shop.msg) { g.fillStyle = shop.ok ? '#7dffb0' : '#ff8a8a'; g.font = '13px system-ui'; g.fillText(shop.msg, cx, ny + 82); }
 }
 
 function drawPerkOverlay() {
@@ -923,7 +1150,11 @@ function drawPerkOverlay() {
     g.font = '700 13px system-ui'; g.fillText(p.name + (pk(p.id) > 1 ? '  x' + pk(p.id) : ''), WALL + 46, y - 6);
     g.font = '10.5px system-ui'; g.fillStyle = '#8b99b3'; g.fillText(p.desc, WALL + 46, y + 8);
   });
-  g.textAlign = 'center'; g.fillStyle = '#6f7d96'; g.font = '12px system-ui'; g.fillText('Натисніть I, щоб закрити', WALL + BW / 2, BH - 16);
+  if (run.mods.length) {
+    g.textAlign = 'center'; g.fillStyle = '#ffb347';
+    fitText('Модифікатори: ' + run.mods.map(id => MODS[id].icon + ' ' + MODS[id].name).join('   '), WALL + BW / 2, BH - 42, BW - 24, 12);
+  }
+  g.textAlign = 'center'; g.fillStyle = '#6f7d96'; g.font = '12px system-ui'; g.fillText(T_CLOSE, WALL + BW / 2, BH - 16);
 }
 
 function overlay(title, sub1, sub2, color = '#ffe066') {
@@ -935,34 +1166,209 @@ function overlay(title, sub1, sub2, color = '#ffe066') {
   sub2.split('\n').forEach((ln, i) => g.fillText(ln, WALL + BW / 2, BH / 2 + 18 + i * 20));
 }
 
-function draw(now) {
-  g.fillStyle = '#0b0f17'; g.fillRect(0, 0, CW, CH);
-  drawWall(0, true);
-  drawWall(WALL + BW, false);
-  if (state === 'shop') { drawShop(); drawShopPanel(); return; }
-  drawBoard(now);
-  drawPanel(now);
+// Draw text shrunk (down to 8px) until it fits maxW.
+function fitText(txt, x, y, maxW, size, weight = '') {
+  let s = size;
+  const set = () => { g.font = `${weight} ${s}px ${EMOJI}`.trim(); };
+  set();
+  while (g.measureText(txt).width > maxW && s > 8) { s -= 0.5; set(); }
+  g.fillText(txt, x, y);
+}
+
+function heatDesc(h) {
+  if (!h) return 'Стандартна складність';
+  return 'Цілі +' + 15 * h + '%, іскор \u2212' + 15 * h + '%, +' + h + (h === 1 ? ' модифікатор' : ' модифікатори') + ' з етапу ' + HEAT_FROM_STAGE;
+}
+function drawHeatPicker() {
+  menuHits = [];
+  const cx = WALL + BW / 2, y = BH / 2 + 112;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = heat ? '#ff8a3d' : '#9fb0cc'; g.font = `700 18px ${EMOJI}`;
+  g.fillText('НАГРІВ  ' + heat + (heat ? '  \u{1F525}' : ''), cx, y);
+  g.fillStyle = heat > 0 ? '#e8eefc' : '#3a4558'; g.font = '700 22px system-ui'; g.fillText('\u25C0', cx - 96, y);
+  g.fillStyle = heat < HEAT_MAX ? '#e8eefc' : '#3a4558'; g.fillText('\u25B6', cx + 96, y);
+  menuHits.push({ x: cx - 120, y: y - 22, w: 48, h: 44, fn: () => setHeat(heat - 1) },
+                { x: cx + 72, y: y - 22, w: 48, h: 44, fn: () => setHeat(heat + 1) });
+  g.fillStyle = '#9fb0cc'; g.font = '12px system-ui'; g.fillText(heatDesc(heat), cx, y + 28);
+  g.fillStyle = '#6f7d96'; g.fillText(T_HEAT, cx, y + 48);
+}
+
+// Rules screen shown before a boss or modified stage.
+function drawBriefing() {
+  g.fillStyle = 'rgba(8,11,18,0.92)'; g.fillRect(WALL, 0, BW, BH);
+  const cx = WALL + BW / 2, b = BOSSES[run.stage];
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = b ? '#ff6a5a' : '#ffb347'; g.font = '700 13px system-ui';
+  g.fillText(b ? (run.stage === STAGES ? 'ФІНАЛЬНИЙ БОС' : 'БОС  \u2022  ЕТАП ' + run.stage) : (run.heat ? 'НАГРІВ ' + run.heat : ''), cx, 50);
+  g.fillStyle = '#ffe066'; g.font = '800 28px system-ui'; g.fillText(b ? b.name : 'ЕТАП ' + run.stage, cx, 86);
+  g.fillStyle = '#e8eefc'; g.font = '18px system-ui'; g.fillText('Ціль: ' + goal(), cx, 126);
+  if (chainNeed()) { g.fillStyle = '#ff9bd0'; g.font = '700 14px system-ui'; g.fillText('+ ланцюжок \u00d7' + chainNeed() + ' за один хід', cx, 152); }
+  let y = 192;
+  for (const id of run.mods) {
+    const m = MODS[id];
+    g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `26px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(m.icon, WALL + 20, y + 14);
+    g.textBaseline = 'alphabetic'; g.font = '700 15px system-ui'; g.fillStyle = '#ffb347'; g.fillText(m.name, WALL + 62, y + 10);
+    g.font = '12px system-ui'; g.fillStyle = '#9fb0cc';
+    wrap(m.desc, BW - 90).forEach((ln, i) => g.fillText(ln, WALL + 62, y + 30 + i * 16));
+    y += 78;
+  }
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#7dffb0'; g.font = '700 15px system-ui';
+  g.fillText(T_START, cx, BH - 34);
+}
+
+// ---- Phone layout: HUD above the board, controls below ----------------
+const PLAY_STATES = ['play', 'clearing', 'settling', 'stagewin'];
+function touchButton(x, y, w, h, label, id, on = true, size = 18) {
+  rr(x, y, w, h, 9);
+  g.fillStyle = press.hit === id ? '#2b4470' : on ? '#17233a' : '#121823'; g.fill();
+  g.lineWidth = 1.5; g.strokeStyle = on ? '#4a6fa5' : '#232d3f'; g.stroke();
+  g.fillStyle = on ? '#e8eefc' : '#56637a'; g.font = `700 ${size}px ${EMOJI}`;
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(label, x + w / 2, y + h / 2 + 1);
+  g.textBaseline = 'alphabetic';
+  uiHits.push({ x, y, w, h, id });
+}
+function drawHud(now) {
+  g.fillStyle = '#0d1320'; g.fillRect(0, 0, CW, HUD_H);
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillStyle = '#ffe066'; g.font = '800 16px system-ui'; g.fillText('CIRCUIT DROP', 12, 22);
+  if (run.heat) { g.fillStyle = '#ff8a3d'; g.font = `700 12px ${EMOJI}`; g.fillText('\u{1F525} ' + run.heat, 126, 22); }
+  let mx = 166;                                  // active modifiers (rising: pieces until the next push)
+  for (const id of run.mods) {
+    g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 22); mx += 20;
+    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, RISE_EVERY - run.sinceRise)), mx, 22); mx += 16; }
+  }
+  if (PLAY_STATES.includes(state)) {
+    touchButton(CW - 46, 6, 34, 28, '\u{1F392}', 'perks', true, 14);
+    touchButton(CW - 86, 6, 34, 28, '\u23F8', 'pause', true, 14);
+    touchButton(CW - 126, 6, 34, 28, muted ? '\u{1F507}' : '\u{1F50A}', 'mute', true, 14);
+  }
+  lab('РАХУНОК', 12, 44);
+  g.fillStyle = '#e8eefc'; g.font = '700 26px system-ui'; g.fillText(String(score), 12, 72);
+  g.fillStyle = '#6f7d96'; g.font = '11px system-ui'; g.fillText('рекорд ' + best, 130, 72);
+  lab('ЕТАП', 12, 92); lab('ІСКРИ', 66, 92); lab('ЗАПОБІЖНИКИ', 130, 92);
+  g.fillStyle = '#e8eefc'; g.font = '700 18px system-ui'; g.fillText(run.stage + '/' + STAGES, 12, 110);
+  g.fillStyle = '#7fd6ff'; g.fillText('\u25C6 ' + run.sparks, 66, 110);
+  drawFuses(130, 96);
+
+  lab('ДАЛІ', 250, 44);
+  for (let i = 0; i < queue.length; i++) {
+    const s = i === 0 ? 40 : 34, tx = [250, 298, 338][i], ty = 50;
+    if (hasMod('blind')) {
+      rr(tx + 2, ty + 2, s - 4, s - 4, 6); g.fillStyle = '#10151f'; g.fill();
+      g.strokeStyle = '#27344a'; g.lineWidth = 1.5; g.stroke();
+      g.fillStyle = '#56637a'; g.font = '700 16px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('?', tx + s / 2, ty + s / 2 + 1); g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+    } else drawTile(tx, ty, queue[i], s, i === 0 ? 1 : 0.7);
+  }
+  lab('ЗАПАС', 404, 44);
+  rr(404, 50, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
+  if (hold) drawTile(404, 50, hold, 52, canHold ? 1 : 0.4);
+
+  lab('ЦІЛЬ', 12, 128);
+  g.textAlign = 'right'; g.fillStyle = '#cfd8ea'; g.font = '700 11px system-ui';
+  g.fillText(stageScore + ' / ' + goal(), CW - 12, 128);
+  if (chainNeed()) {
+    const ok = stageMaxChain >= chainNeed();
+    g.textAlign = 'center'; g.fillStyle = ok ? '#7dffb0' : '#ff9bd0';
+    g.fillText('ЛАНЦЮЖОК \u00d7' + chainNeed() + (ok ? ' \u2713' : ''), CW / 2, 128);
+  }
+  g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(12, 132, CW - 24, 6, 3); g.fill();
+  const gp = Math.min(1, stageScore / goal());
+  if (gp > 0.01) { g.fillStyle = gp >= 1 ? '#7dffb0' : '#ffe066'; rr(12, 132, Math.max(6, (CW - 24) * gp), 6, 3); g.fill(); }
+}
+function drawControls(now) {
+  const y0 = HUD_H + BH, w = CW - 24, half = w / 2 - 10;
+  g.fillStyle = '#0d1320'; g.fillRect(0, y0, CW, CTRL_H);
+  if (!PLAY_STATES.includes(state)) return;
+  lab('НАПРУГА', 12, y0 + 16);
+  g.fillStyle = '#18202e'; rr(12, y0 + 20, half, 12, 4); g.fill();
+  g.fillStyle = `hsl(${130 - 130 * Math.min(1, volt / 0.9)},85%,55%)`;
+  if (volt > 0.01) { rr(12, y0 + 20, Math.max(8, half * volt), 12, 4); g.fill(); }
+  const cx0 = 12 + w / 2 + 10;
+  lab('ЗАРЯД', cx0, y0 + 16);
+  g.textAlign = 'right'; g.fillStyle = '#3de0d0'; g.font = `700 12px ${EMOJI}`; g.fillText('\u26A1'.repeat(charges), cx0 + half, y0 + 16); g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(cx0, y0 + 20, half, 12, 4); g.fill();
+  if (charge > 1) {
+    g.globalAlpha = charges > 0 ? 0.75 + 0.25 * Math.sin(now / 150) : 1;
+    g.fillStyle = '#3de0d0'; rr(cx0, y0 + 20, Math.max(8, half * charge / 100), 12, 4); g.fill(); g.globalAlpha = 1;
+  }
+  const bw = (w - 16) / 3, xs = [12, 12 + bw + 8, 12 + 2 * (bw + 8)];
+  const powers = [['\u0423\u0414\u0410\u0420', topInCol(cur ? cur.col : 0) >= 0], ['\u041d\u0410\u0417\u0410\u0414', undoable()], ['\u0425\u0420\u0415\u0421\u0422', !!cur]];
+  powers.forEach(([name, usable], i) => touchButton(xs[i], y0 + 42, bw, 38, name, 'p' + i, charges > 0 && usable, 14));
+  touchButton(xs[0], y0 + 88, bw, 56, '\u25C0', 'left', true, 24);
+  touchButton(xs[1], y0 + 88, bw, 56, '\u21BB', 'rot', true, 28);
+  touchButton(xs[2], y0 + 88, bw, 56, '\u25B6', 'right', true, 24);
+  touchButton(xs[0], y0 + 152, bw, 44, '\u25BC швидко', 'soft', true, 14);
+  touchButton(xs[1], y0 + 152, bw, 44, '\u25BC\u25BC скинути', 'drop', true, 14);
+  touchButton(xs[2], y0 + 152, bw, 44, 'ЗАПАС', 'hold', canHold, 14);
+}
+function drawHudShop() {
+  g.fillStyle = '#0d1320'; g.fillRect(0, 0, CW, HUD_H);
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillStyle = '#ffe066'; g.font = '800 16px system-ui'; g.fillText('CIRCUIT DROP', 12, 22);
+  if (run.heat) { g.fillStyle = '#ff8a3d'; g.font = `700 12px ${EMOJI}`; g.fillText('\u{1F525} ' + run.heat, 126, 22); }
+  lab('РАХУНОК', 12, 52);
+  g.fillStyle = '#e8eefc'; g.font = '700 26px system-ui'; g.fillText(String(score), 12, 82);
+  lab('ІСКРИ', 190, 52);
+  g.fillStyle = '#7fd6ff'; g.font = '700 26px system-ui'; g.fillText('\u25C6 ' + run.sparks, 190, 82);
+  lab('ЗАПОБІЖНИКИ', 330, 52);
+  drawFuses(330, 62);
+  g.fillStyle = '#6f7d96'; g.font = '11px system-ui'; g.fillText('етап ' + run.stage + ' / ' + STAGES + '   \u2022   рекорд ' + best, 12, 112);
+}
+function drawPerkStrip() {
+  const y0 = HUD_H + BH;
+  g.fillStyle = '#0d1320'; g.fillRect(0, y0, CW, CTRL_H);
+  lab('ВАШІ ПЕРКИ', 12, y0 + 18);
+  const own = PERKS.filter(p => pk(p.id) > 0);
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  if (!own.length) { g.fillStyle = '#56637a'; g.font = '12px system-ui'; g.fillText('поки немає', 12, y0 + 42); }
+  own.slice(0, 16).forEach((p, i) => {
+    g.fillStyle = '#cfd8ea';
+    fitText(p.icon + ' ' + p.name + (pk(p.id) > 1 ? ' x' + pk(p.id) : ''), 12 + (i % 2) * (CW / 2), y0 + 42 + ((i / 2) | 0) * 20, CW / 2 - 18, 12);
+  });
+}
+
+function drawOverlays() {
   const perkCount = PERKS.reduce((n, p) => n + pk(p.id), 0);
-  if (state === 'ready') overlay('CIRCUIT DROP', 'З’єднайте + з −, щоб очистити мережу', 'Пройдіть 9 етапів.\nВитрачайте іскри на перки між етапами.\nEnter або клік — почати', '#ffe066');
-  else if (state === 'over') overlay('КІНЕЦЬ ЗАБІГУ', 'Етап ' + run.stage + ' / ' + STAGES + '   •   Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків зібрано: ' + perkCount + '\nEnter або клік — новий забіг', '#ff6a5a');
-  else if (state === 'victory') overlay('ЗАБІГ ПРОЙДЕНО!', 'Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків: ' + perkCount + ', запобіжників: ' + run.fuses + '\nEnter або клік — новий забіг', '#7dffb0');
+  if (state === 'ready') overlay('CIRCUIT DROP', 'З’єднайте + з −, щоб очистити мережу', 'Пройдіть 9 етапів.\nВитрачайте іскри на перки між етапами.\n' + T_START, '#ffe066');
+  else if (state === 'over') overlay('КІНЕЦЬ ЗАБІГУ', 'Етап ' + run.stage + ' / ' + STAGES + '   •   Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків зібрано: ' + perkCount + '\n' + T_NEW, '#ff6a5a');
+  else if (state === 'victory') overlay('ЗАБІГ ПРОЙДЕНО!', 'Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків: ' + perkCount + ', запобіжників: ' + run.fuses + '\n' + T_NEW, '#7dffb0');
   else if (state === 'stagewin') {
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.lineWidth = 6; g.strokeStyle = '#000'; g.fillStyle = '#7dffb0'; g.font = '800 34px system-ui';
     g.strokeText(run.stage === STAGES ? 'ФІНАЛ ПРОЙДЕНО!' : 'ЕТАП ПРОЙДЕНО!', WALL + BW / 2, BH / 2);
     g.fillText(run.stage === STAGES ? 'ФІНАЛ ПРОЙДЕНО!' : 'ЕТАП ПРОЙДЕНО!', WALL + BW / 2, BH / 2);
   }
+  else if (state === 'briefing') drawBriefing();
   else if (showPerks) drawPerkOverlay();
-  else if (paused) overlay('ПАУЗА', 'Натисніть P, щоб продовжити', '');
+  else if (paused) overlay('ПАУЗА', T_RESUME, '');
+  if (state === 'ready' || state === 'over' || state === 'victory') drawHeatPicker();
+}
+
+function draw(now) {
+  g.fillStyle = '#0b0f17'; g.fillRect(0, 0, CW, CH);
+  uiHits = [];
+  g.save(); g.translate(0, boardY);              // everything board-related is drawn in board coordinates
+  drawWall(0, true);
+  drawWall(WALL + BW, false);
+  if (state === 'shop') { drawShop(); if (!portrait) drawShopPanel(); }
+  else { drawBoard(now); if (!portrait) drawPanel(now); drawOverlays(); }
+  g.restore();
+  if (portrait) {
+    if (state === 'shop') { drawHudShop(); drawPerkStrip(); }
+    else { drawHud(now); drawControls(now); }
+  }
 }
 
 // ---- Main loop ------------------------------------------------------
 grid = emptyGrid(); queue = []; hold = null; canHold = true; bag = [];
 score = 0; level = 1; circuits = 0; chain = 0;
 let last = performance.now();
-const IDLE = ['ready', 'over', 'shop', 'victory'];
+const IDLE = ['ready', 'over', 'shop', 'victory', 'briefing'];
 function frame(now) {
   const dt = Math.min(50, now - last); last = now;
+  if (innerWidth !== layoutW || innerHeight !== layoutH) setLayout();   // also catches mobile URL-bar resizes
   if (!paused && !IDLE.includes(state)) update(dt);
   else if (IDLE.includes(state)) {
     if (state === 'victory' && Math.random() < dt / 120) burst(WALL + Math.random() * BW, Math.random() * BH * 0.7, ['#ffe066', '#7dffb0', '#6db4ff', '#ff9bd0'][(Math.random() * 4) | 0], 12);
