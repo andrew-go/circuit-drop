@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="uk">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -14,22 +14,41 @@
 <script>
 'use strict';
 // =====================================================================
-//  CIRCUIT DROP - prototype
+//  CIRCUIT DROP - roguelike prototype
 //  Connect the + wall (left) to the - wall (right) with falling pipe tiles.
+//  A run = 9 stages. Each stage has a score goal. Spend sparks on perks between stages.
 // =====================================================================
 
 // ---- Tunables -------------------------------------------------------
 const COLS = 7, ROWS = 12, T = 52;       // grid size and tile size (px)
 const WALL = 52, PANEL = 220;            // layout
-const MAX_CHARGES = 2;                   // banked power-ups
+const BASE_CHARGES = 2;                  // banked power-ups (Capacitor Bank perk adds more)
 const CHARGE_BASE = 2, CHARGE_PER_LINK = 5, CHARGE_PER_CIRCUIT = 20;
 const CHARGE_MERCY = 1.5;                // charge multiplier while the stack is dangerously high
 const SPARK_MS = 70;                     // spark speed along a closed circuit
 const LOCK_DELAY = 450;                  // ms before a resting tile locks
 const SETTLE_SPEED = 0.014;              // rows/ms for tiles falling after a clear
-const fallInterval = () => Math.max(110, 800 - (level - 1) * 65);
-const pInsulator   = () => Math.min(0.22, 0.03 + 0.018 * (level - 1));
-const P_RESISTOR = 0.06, P_BOMB = 0.03;
+
+// ---- Run structure (tune these first when balancing) ----------------
+const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 2000];   // score per stage; the last is the boss
+const STAGES = GOALS.length;
+const START_FUSES = 3;
+const STAGE_BONUS = 8, STAGE_BONUS_PER = 2;   // sparks for clearing a stage: 8 + 2 * stage
+const SPARKS_PER_CIRCUIT = 2;                 // plus 1 per extra chain step
+const ALL_CLEAR_MIN = 10, ALL_CLEAR_BASE = 100, ALL_CLEAR_PER = 40;   // emptying the board after clearing 10+ tiles
+const OVERLOAD_ROWS = 4;                    // rows burned away when the stack overflows
+const REPAIR_COST = 10, REPAIR_STEP = 4, REROLL_COST = 2;
+const TIER_COST = { 1: 6, 2: 9, 3: 13 };
+const TIER_WEIGHT = { 1: 3, 2: 2, 3: 1 };
+const TIER_NAME = { 1: 'ЗВИЧАЙНИЙ', 2: 'НЕЗВИЧАЙНИЙ', 3: 'РІДКІСНИЙ' };
+const TIER_COLOR = { 1: '#8b99b3', 2: '#6db4ff', 3: '#ffb347' };
+
+const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
+const pInsulator   = () => Math.min(0.3, (0.03 + 0.018 * (level - 1)) * (pk('clean') ? 0.5 : 1) + (level === STAGES ? 0.1 : 0));
+const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
+const pBomb        = () => 0.03 * (pk('demo') ? 2.5 : 1);
+const maxCharges   = () => BASE_CHARGES + pk('bank');
+
 // Tile shapes: mask bits are UP=1 RIGHT=2 DOWN=4 LEFT=8. w = weight in the bag.
 const SHAPES = [
   { name: 'straight', mask: 5,  w: 4 },
@@ -37,6 +56,29 @@ const SHAPES = [
   { name: 'tee',      mask: 11, w: 3 },
   { name: 'cross',    mask: 15, w: 1 },
   { name: 'end',      mask: 1,  w: 2 },
+];
+
+// ---- Perks (effects are read through pk(id) in the code below) ------
+const PERKS = [
+  { id: 'crosses',   icon: '✚',        name: 'Більше хрестовин',   tier: 1, max: 3, desc: '+2 чотиристоронні хрестовини в мішку плиток.' },
+  { id: 'rewire',    icon: '\u{1F527}',     name: 'Перепрокладка',          tier: 1,         desc: 'Тупиків більше немає: вони стають поворотами.' },
+  { id: 'slowfall',  icon: '\u{1F422}',     name: 'Повільний струм',    tier: 1, max: 2, desc: 'Плитки падають на 25% повільніше.' },
+  { id: 'prospect',  icon: '⛏️',  name: 'Старатель',      tier: 1, max: 3, desc: '+1 іскра за кожне замкнене коло.' },
+  { id: 'qcharge',   icon: '⚡',        name: 'Швидкий заряд',    tier: 1, max: 2, desc: 'Шкала заряду заповнюється на 50% швидше.' },
+  { id: 'clean',     icon: '\u{1F9FC}',     name: 'Чиста кімната',      tier: 1,         desc: 'Ізолятори з’являються вдвічі рідше.' },
+  { id: 'branch',    icon: '\u{1F33F}',     name: 'Розгалуження',      tier: 2,         desc: 'Трійники й хрестовини в колі дають 50 очок замість 20.' },
+  { id: 'bank',      icon: '\u{1F50B}',     name: 'Батарея конденсаторів',  tier: 2,         desc: 'Можна зберігати ще один заряд.' },
+  { id: 'burn',      icon: '\u{1F9EF}',     name: 'Захист від стрибків', tier: 2,         desc: 'Перевантаження випалює 6 рядів замість 4.' },
+  { id: 'arc',       icon: '\u{1F329}️', name: 'Дуговий розряд',     tier: 2,         desc: 'Коло випалює й ізолятори по діагоналі.' },
+  { id: 'ohm',       icon: 'Ω',        name: 'Закон Ома',       tier: 2,         desc: 'Резистори з’являються втричі частіше й дають +40 до кола.' },
+  { id: 'swap',      icon: '\u{1F501}',     name: 'Вільна заміна',       tier: 2,         desc: 'Міняйте плитку із запасом скільки завгодно.' },
+  { id: 'interest',  icon: '\u{1F3E6}',     name: 'Відсотки',        tier: 2,         desc: 'Після етапу +1 іскра за кожні 5 у вас (макс. +4).' },
+  { id: 'resonance', icon: '\u{1F514}',     name: 'Резонанс',       tier: 2,         desc: 'З 2-го кроку ланцюжка бонус ланцюжка ×1,5.' },
+  { id: 'magnet',    icon: '\u{1F9F2}',     name: 'Магніт',          tier: 3,         desc: 'Плитки в колонці біля стіни теж торкаються її.' },
+  { id: 'overclock', icon: '\u{1F680}',     name: 'Розгін',       tier: 3,         desc: 'Очки ×1,5, але плитки падають на 40% швидше.' },
+  { id: 'demo',      icon: '\u{1F4A5}',     name: 'Підрив',      tier: 3,         desc: 'Бомби з’являються у 2,5 раза частіше й б’ють по зоні 5×5.' },
+  { id: 'spare',     icon: '\u{1F50C}',     name: 'Запасний запобіжник',      tier: 3,         desc: '+1 макс. запобіжник і відновлення 1 одразу.' },
+  { id: 'net',       icon: '\u{1F6DF}',     name: 'Страхувальна сітка',      tier: 3,         desc: 'Перше перевантаження на етапі не коштує запобіжника.' },
 ];
 
 // ---- Constants derived from the above -------------------------------
@@ -53,6 +95,7 @@ const opp   = d => ((d << 2) | (d >> 2)) & 15;
 const rotCW = m => ((m << 1) | (m >> 3)) & 15;
 const rotCCW = m => ((m >> 1) | (m << 3)) & 15;
 const bits  = m => (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1);
+const EMOJI = '"Segoe UI Emoji","Apple Color Emoji",system-ui,sans-serif';
 
 const canvas = document.getElementById('c');
 const g = canvas.getContext('2d');
@@ -84,39 +127,61 @@ function beep(f, d = 0.08, type = 'square', v = 0.035, slide = 0) {
 }
 
 // ---- Game state -----------------------------------------------------
-let grid, cur, hold, canHold, queue, bag, score, level, circuits, chain;
-let state = 'ready';            // ready | play | clearing | settling | over
-let paused = false;
+let grid, cur, hold, canHold, queue, bag, score, level, circuits, chain, chainTiles = 0;
+let state = 'ready';            // ready | play | clearing | settling | stagewin | shop | over | victory
+let paused = false, showPerks = false;
 let gravAcc = 0, lockAcc = 0, curX = 0, clearing = null;
 let particles = [], texts = [], wallGlow = 0, volt = 0, best = 0;
 let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked power-ups, undo target
+let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [];
 try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
+
+function freshRun() {
+  return { stage: 1, fuses: START_FUSES, maxFuses: START_FUSES, sparks: 0, perks: {}, netUsed: false, repairs: 0 };
+}
+function pk(id) { return (run && run.perks[id]) || 0; }
+const goal = () => GOALS[run.stage - 1];
+const addScore = n => { score += n; stageScore += n; };
 
 function emptyGrid() { return Array.from({ length: ROWS }, () => Array(COLS).fill(null)); }
 function newTile(kind, mask) { return { kind, mask, hp: kind === 'res' ? 2 : 1, dy: 0, lit: false, cl: false, cr: false }; }
 
 function refillBag() {
   bag = [];
-  for (const s of SHAPES) for (let i = 0; i < s.w; i++) bag.push(s);
+  for (const s of SHAPES) {
+    let w = s.w;
+    if (s.name === 'cross') w += 2 * pk('crosses');
+    if (pk('rewire')) { if (s.name === 'end') w = 0; if (s.name === 'corner') w += 2; }
+    for (let i = 0; i < w; i++) bag.push(s);
+  }
   for (let i = bag.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [bag[i], bag[j]] = [bag[j], bag[i]]; }
 }
 function makeNext() {
   const r = Math.random(), pi = pInsulator();
   if (r < pi) return newTile('ins', 0);
-  if (r < pi + P_BOMB) return newTile('bomb', 0);
-  if (!bag.length) refillBag();
+  if (r < pi + pBomb()) return newTile('bomb', 0);
+  if (!bag || !bag.length) refillBag();
   let mask = bag.pop().mask;
   for (let i = (Math.random() * 4) | 0; i > 0; i--) mask = rotCW(mask);
-  return newTile(Math.random() < P_RESISTOR ? 'res' : 'normal', mask);
+  return newTile(Math.random() < pResistor() ? 'res' : 'normal', mask);
 }
 
-function reset() {
-  grid = emptyGrid(); bag = []; queue = []; hold = null; canHold = true;
-  score = 0; level = 1; circuits = 0; chain = 0;
-  particles = []; texts = []; clearing = null; paused = false; volt = 0;
-  charge = 0; charges = 0; lastLock = null;
-  for (let i = 0; i < 3; i++) queue.push(makeNext());
+// ---- Run / stage flow -----------------------------------------------
+function newRun() {
+  run = freshRun();
+  score = 0; circuits = 0; hold = null; charge = 0; charges = 0; bag = []; queue = []; canHold = true;
+  showPerks = false;
+  startStage();
+}
+function startStage() {
+  grid = emptyGrid(); chain = 0; clearing = null; lastLock = null; shop = null; summary = null;
+  particles = []; texts = []; paused = false; volt = 0;
+  stageScore = 0; run.netUsed = false; level = run.stage;
+  while (queue.length < 3) queue.push(makeNext());
   spawn();
+  const boss = run.stage === STAGES;
+  popText(boss ? 'ФІНАЛЬНИЙ ЕТАП' : 'ЕТАП ' + run.stage, WALL + BW / 2, BH / 2 - 30, boss ? '#ff6a5a' : '#ffe066', 28);
+  popText('ціль ' + goal(), WALL + BW / 2, BH / 2 + 6, '#e8eefc', 18);
 }
 function spawn() {
   canHold = true;
@@ -126,26 +191,102 @@ function spawn() {
 function startPiece(t) {
   cur = { tile: t, col: COLS >> 1, row: 0, y: -1 };
   curX = cur.col; gravAcc = 0; lockAcc = 0; state = 'play';
-  if (grid[0][cur.col]) gameOver();
+  if (grid[0][cur.col]) overload();
+}
+// The stack reached the spawn point: burn the top rows and lose a fuse.
+function overload() {
+  const free = pk('net') && !run.netUsed;
+  if (free) run.netUsed = true; else run.fuses--;
+  const rows = OVERLOAD_ROWS + 2 * pk('burn');
+  for (let r = 0; r < rows; r++) for (let c = 0; c < COLS; c++) {
+    if (grid[r][c]) { grid[r][c] = null; burst(WALL + (c + 0.5) * T, (r + 0.5) * T, '#ff6a5a', 6); }
+  }
+  popText(free ? 'СІТКА СПРАЦЮВАЛА!' : 'ЗАПОБІЖНИК ЗГОРІВ  −1', WALL + BW / 2, BH / 2 - 40, free ? '#3de0d0' : '#ff6a5a', 22);
+  beep(160, 0.5, 'sawtooth', 0.06, -110);
+  updateFlags(flood(true));
+  if (run.fuses <= 0) gameOver();
+}
+function saveBest() {
+  if (score > best) { best = score; try { localStorage.setItem('circuitDropBest', best); } catch (e) {} }
 }
 function gameOver() {
-  state = 'over'; cur = null;
-  if (score > best) { best = score; try { localStorage.setItem('circuitDropBest', best); } catch (e) {} }
+  state = 'over'; cur = null; saveBest();
   beep(220, 0.5, 'sawtooth', 0.05, -160);
 }
+function winStage() {
+  state = 'stagewin'; winT = 0;
+  const reward = STAGE_BONUS + STAGE_BONUS_PER * run.stage;
+  const interest = pk('interest') ? Math.min(4, Math.floor(run.sparks / 5)) : 0;
+  run.sparks += reward + interest;
+  summary = { reward, interest };
+  beep(660, 0.3, 'sine', 0.06, 440);
+}
+function updateStageWin(dt) {
+  winT += dt;
+  if (Math.random() < dt / 90) burst(WALL + Math.random() * BW, Math.random() * BH * 0.6, ['#ffe066', '#7dffb0', '#6db4ff', '#ff9bd0'][(Math.random() * 4) | 0], 10);
+  if (winT > 1900) {
+    if (run.stage === STAGES) { state = 'victory'; saveBest(); } else openShop();
+  }
+}
+
+// ---- Shop -----------------------------------------------------------
+function rollOffers() {
+  const pool = PERKS.filter(p => pk(p.id) < (p.max || 1));
+  const out = [];
+  while (out.length < 3 && pool.length) {
+    let tot = 0; for (const p of pool) tot += TIER_WEIGHT[p.tier];
+    let r = Math.random() * tot, i = 0;
+    for (; i < pool.length - 1; i++) { r -= TIER_WEIGHT[pool[i].tier]; if (r < 0) break; }
+    const p = pool.splice(i, 1)[0];
+    out.push({ perk: p, cost: TIER_COST[p.tier], sold: false });
+  }
+  return out;
+}
+function openShop() { state = 'shop'; shop = { offers: rollOffers(), rerolls: 0, msg: '' }; }
+const repairCost = () => REPAIR_COST + REPAIR_STEP * run.repairs;
+const rerollCost = () => REROLL_COST + shop.rerolls;
+function shopMsg(m, ok) { shop.msg = m; shop.ok = ok; beep(ok ? 700 : 170, 0.12, ok ? 'sine' : 'sawtooth', 0.05); }
+function buyOffer(i) {
+  const o = shop.offers[i];
+  if (!o || o.sold) return;
+  if (run.sparks < o.cost) return shopMsg('Не вистачає іскор', false);
+  run.sparks -= o.cost; o.sold = true;
+  run.perks[o.perk.id] = pk(o.perk.id) + 1;
+  if (o.perk.id === 'spare') { run.maxFuses++; run.fuses++; }
+  bag = [];                                    // rebuild the bag so tile-pool perks apply at once
+  shopMsg(o.perk.name + ' встановлено', true);
+}
+function buyRepair() {
+  if (run.fuses >= run.maxFuses) return shopMsg('Запобіжники вже повні', false);
+  if (run.sparks < repairCost()) return shopMsg('Не вистачає іскор', false);
+  run.sparks -= repairCost(); run.repairs++; run.fuses++;
+  shopMsg('Запобіжник відремонтовано', true);
+}
+function rerollShop() {
+  if (run.sparks < rerollCost()) return shopMsg('Не вистачає іскор', false);
+  run.sparks -= rerollCost(); shop.rerolls++;
+  const fresh = rollOffers();
+  shop.offers = shop.offers.map((o, i) => (o.sold || !fresh[i]) ? o : fresh[i]);
+  shopMsg('Пропозиції оновлено', true);
+}
+function nextStage() { run.stage++; startStage(); }
 
 // ---- Grid helpers ---------------------------------------------------
 const inRange = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
 const canMove = (r, c) => inRange(r, c) && !grid[r][c];
+const wallReach = () => 1 + pk('magnet');       // how many columns from a wall still touch it
 
 // Flood-fill from the left (or right) wall along matching openings.
 // Returns Map(cellKey -> distance from the wall).
 function flood(fromLeft) {
   const dist = new Map(), q = [];
-  const c0 = fromLeft ? 0 : COLS - 1, bit = fromLeft ? LEFT : RIGHT;
-  for (let r = 0; r < ROWS; r++) {
-    const t = grid[r][c0];
-    if (t && (t.mask & bit)) { dist.set(r * COLS + c0, 0); q.push([r, c0]); }
+  const bit = fromLeft ? LEFT : RIGHT;
+  for (let k = 0; k < wallReach(); k++) {
+    const c0 = fromLeft ? k : COLS - 1 - k;
+    for (let r = 0; r < ROWS; r++) {
+      const t = grid[r][c0];
+      if (t && (t.mask & bit)) { dist.set(r * COLS + c0, 0); q.push([r, c0]); }
+    }
   }
   for (let i = 0; i < q.length; i++) {
     const [r, c] = q[i], t = grid[r][c], d = dist.get(r * COLS + c);
@@ -174,7 +315,7 @@ function updateFlags(L) {
 function lockPiece() {
   const { tile, col, row } = cur;
   grid[row][col] = tile; tile.dy = row; cur = null;
-  chain = 0;
+  chain = 0; chainTiles = 0;
   beep(130, 0.07, 'triangle', 0.06, -40);
   if (tile.kind !== 'bomb') {
     lastLock = { row, col, tile };
@@ -194,8 +335,8 @@ function lockPiece() {
     }
   }
   if (tile.kind === 'bomb') {
-    const cells = [];
-    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+    const rad = 1 + pk('demo'), cells = [];
+    for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
       if (inRange(row + dr, col + dc) && grid[row + dr][col + dc]) cells.push({ r: row + dr, c: col + dc, d: 0, fired: false });
     }
     startClear(cells, 'bomb');
@@ -209,7 +350,7 @@ function resolve() {
   let closed = false;
   for (const k of L.keys()) {
     const r = (k / COLS) | 0, c = k % COLS;
-    if (c === COLS - 1 && (grid[r][c].mask & RIGHT)) { closed = true; break; }
+    if (c >= COLS - wallReach() && (grid[r][c].mask & RIGHT)) { closed = true; break; }
   }
   if (closed) {
     const cells = [];
@@ -218,25 +359,29 @@ function resolve() {
     return;
   }
   updateFlags(L);
-  if (chain > 0 && grid.every(row => row.every(t => !t))) {
-    score += 1000; popText('ALL CLEAR  +1000', WALL + BW / 2, BH / 2, '#7dffb0', 22);
+  if (chain > 0 && chainTiles >= ALL_CLEAR_MIN && grid.every(row => row.every(t => !t))) {
+    const bonus = ALL_CLEAR_BASE + ALL_CLEAR_PER * run.stage;
+    addScore(bonus); popText('ПОЛЕ ЧИСТЕ  +' + bonus, WALL + BW / 2, BH / 2, '#7dffb0', 22);
     beep(880, 0.4, 'sine', 0.06, 440);
   }
   chain = 0;
+  if (stageScore >= goal()) { winStage(); return; }
   spawn();
 }
 
 // ---- Charge meter & power-ups ----------------------------------------
 function addCharge(n) {
-  if (charges >= MAX_CHARGES) return 0;
+  const cap = maxCharges();
+  if (charges >= cap) return 0;
   if (volt > 0.55) n *= CHARGE_MERCY;           // struggling players charge faster
+  n *= 1 + 0.5 * pk('qcharge');
   charge += n;
-  while (charge >= 100 && charges < MAX_CHARGES) {
+  while (charge >= 100 && charges < cap) {
     charge -= 100; charges++;
-    popText('POWER READY', WALL + BW / 2, BH / 2 - 60, '#3de0d0', 20);
+    popText('ЗАРЯД ГОТОВИЙ', WALL + BW / 2, BH / 2 - 60, '#3de0d0', 20);
     beep(660, 0.25, 'sine', 0.06, 440);
   }
-  if (charges >= MAX_CHARGES) charge = 100;
+  if (charges >= cap) charge = 100;
   return n;
 }
 const topInCol = c => { for (let r = 0; r < ROWS; r++) if (grid[r][c]) return r; return -1; };
@@ -250,7 +395,7 @@ function usePower(i) {
     if (r >= 0) {
       grid[r][cur.col] = null;
       for (let y = cur.row; y <= r; y++) burst(WALL + (cur.col + 0.5) * T, (y + 0.5) * T, '#3de0d0', 3);
-      popText('ZAP!', WALL + (cur.col + 0.5) * T, r * T + 10, '#3de0d0', 18);
+      popText('УДАР!', WALL + (cur.col + 0.5) * T, r * T + 10, '#3de0d0', 18);
       updateFlags(flood(true)); beep(900, 0.18, 'sawtooth', 0.04, -600); ok = true;
     }
   } else if (i === 1) {                         // UNDO: take back the last drop
@@ -261,12 +406,12 @@ function usePower(i) {
       L.tile.cl = L.tile.cr = false;
       startPiece(L.tile); lastLock = null;
       updateFlags(flood(true));
-      popText('UNDO', WALL + (L.col + 0.5) * T, L.row * T + 10, '#3de0d0', 18);
+      popText('НАЗАД', WALL + (L.col + 0.5) * T, L.row * T + 10, '#3de0d0', 18);
       beep(300, 0.2, 'triangle', 0.05, 400); ok = true;
     }
   } else {                                      // CROSS: turn the falling tile into a 4-way junction
     const t = cur.tile; t.kind = 'normal'; t.mask = 15; t.hp = 1;
-    popText('CROSS', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18);
+    popText('ХРЕСТ', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18);
     beep(700, 0.15, 'sine', 0.05, 300); ok = true;
   }
   if (ok) { charges--; if (charge >= 100) charge = 0; }
@@ -274,25 +419,35 @@ function usePower(i) {
 
 function startClear(cells, kind) {
   chain++; lastLock = null;
+  chainTiles += cells.length;
   if (kind === 'circuit') addCharge(CHARGE_PER_CIRCUIT * chain);
-  let maxD = 0, special = 0, sx = 0, sy = 0;
+  let maxD = 0, special = 0, resistors = 0, sx = 0, sy = 0;
   for (const cl of cells) {
     const t = grid[cl.r][cl.c];
     maxD = Math.max(maxD, cl.d); sx += cl.c; sy += cl.r;
     if (bits(t.mask) >= 3) special++;
+    if (t.kind === 'res') resistors++;
   }
   const n = cells.length;
+  const mult = (chain >= 2 && pk('resonance')) ? chain * 1.5 : chain;
   let pts;
   if (kind === 'circuit') {
-    pts = (n * 10 + maxD * 5 + special * 20) * chain;
-    circuits++; level = 1 + Math.floor(circuits / 3); wallGlow = 1;
+    pts = (n * 10 + maxD * 5 + special * (pk('branch') ? 50 : 20) + (pk('ohm') ? resistors * 40 : 0)) * mult;
+    circuits++; wallGlow = 1;
   } else {
-    pts = n * 15 * chain;
+    pts = n * 15 * mult;
   }
-  score += pts;
+  if (pk('overclock')) pts *= 1.5;
+  pts = Math.round(pts);
+  addScore(pts);
   const px = WALL + (sx / n + 0.5) * T, py = (sy / n + 0.5) * T;
   popText('+' + pts, px, py, '#ffe066', 20);
-  if (chain > 1) popText('CHAIN x' + chain, px, py + 24, '#ff9bd0', 16);
+  if (chain > 1) popText('ЛАНЦЮЖОК ×' + chain, px, py + 24, '#ff9bd0', 16);
+  if (kind === 'circuit') {
+    const sp = SPARKS_PER_CIRCUIT + pk('prospect') + (chain - 1);
+    run.sparks += sp;
+    popText('+' + sp + ' ◆', px, py - 24, '#7fd6ff', 14);
+  }
   clearing = { cells, kind, t: 0, end: maxD * SPARK_MS + (kind === 'circuit' ? 450 : 350) };
   state = 'clearing';
 }
@@ -322,10 +477,13 @@ function finishClear() {
     grid[cl.r][cl.c] = null;
   }
   if (kind === 'circuit') {                                       // insulators touching the circuit burn out
-    for (const cl of cells) for (const D of DIRS) {
+    const around = pk('arc')
+      ? [-1, 0, 1].flatMap(dr => [-1, 0, 1].map(dc => ({ dr, dc })))
+      : DIRS;
+    for (const cl of cells) for (const D of around) {
       const nr = cl.r + D.dr, nc = cl.c + D.dc;
       if (inRange(nr, nc) && grid[nr][nc] && grid[nr][nc].kind === 'ins') {
-        grid[nr][nc] = null; score += 5;
+        grid[nr][nc] = null; addScore(5);
         burst(WALL + (nc + 0.5) * T, (nr + 0.5) * T, '#9aa3b5', 5);
       }
     }
@@ -395,6 +553,7 @@ function update(dt) {
   if (state === 'play') updatePlay(dt);
   else if (state === 'clearing') updateClearing(dt);
   else if (state === 'settling' && !moving) resolve();
+  else if (state === 'stagewin') updateStageWin(dt);
   updateFx(dt);
   // voltage meter = how high the stack is
   let top = ROWS;
@@ -407,12 +566,21 @@ addEventListener('keydown', e => {
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
   keys.add(e.code);
   if (e.code === 'KeyM') { muted = !muted; return; }
-  if (state === 'ready' || state === 'over') {
-    if (e.code === 'Enter' || e.code === 'Space') reset();
+  if (state === 'ready' || state === 'over' || state === 'victory') {
+    if (e.code === 'Enter') newRun();           // Enter only, so a mashed Space can't skip the result screen
     return;
   }
-  if (e.code === 'KeyR') { reset(); return; }
-  if (e.code === 'KeyP' || e.code === 'Escape') { paused = !paused; return; }
+  if (state === 'shop') {
+    if (e.code === 'Digit1' || e.code === 'Numpad1') buyOffer(0);
+    else if (e.code === 'Digit2' || e.code === 'Numpad2') buyOffer(1);
+    else if (e.code === 'Digit3' || e.code === 'Numpad3') buyOffer(2);
+    else if (e.code === 'Digit4' || e.code === 'Numpad4') buyRepair();
+    else if (e.code === 'Digit5' || e.code === 'Numpad5') rerollShop();
+    else if (e.code === 'Enter') nextStage();
+    return;
+  }
+  if (e.code === 'KeyP' || e.code === 'Escape') { paused = !paused; showPerks = false; return; }
+  if (e.code === 'KeyI') { showPerks = !showPerks; paused = showPerks; return; }
   if (paused || state !== 'play' || !cur) return;
   const t = cur.tile;
   switch (e.code) {
@@ -432,7 +600,7 @@ addEventListener('keydown', e => {
     case 'Digit3': case 'Numpad3': usePower(2); break;
     case 'KeyC': case 'ShiftLeft': case 'ShiftRight':
       if (!canHold) break;
-      canHold = false;
+      canHold = !!pk('swap');
       if (hold) { const h = hold; hold = t; startPiece(h); }
       else { hold = t; startPiece(queue.shift()); queue.push(makeNext()); }
       beep(420, 0.06, 'triangle', 0.04, 200);
@@ -441,6 +609,14 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => keys.delete(e.code));
 addEventListener('blur', () => keys.clear());
+canvas.addEventListener('click', e => {
+  const r = canvas.getBoundingClientRect();
+  const x = (e.clientX - r.left) * CW / r.width, y = (e.clientY - r.top) * CH / r.height;
+  if (state === 'ready' || state === 'over' || state === 'victory') { newRun(); return; }
+  if (state === 'shop') for (const h of shopHits) {
+    if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); break; }
+  }
+});
 
 // ---- Rendering ------------------------------------------------------
 function rr(x, y, w, h, r) {
@@ -449,6 +625,15 @@ function rr(x, y, w, h, r) {
   g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
   g.arcTo(x, y + h, x, y, r);         g.arcTo(x, y, x + w, y, r);
   g.closePath();
+}
+function wrap(text, maxW) {
+  const lines = []; let line = '';
+  for (const w of text.split(' ')) {
+    const t = line ? line + ' ' + w : w;
+    if (g.measureText(t).width > maxW && line) { lines.push(line); line = w; } else line = t;
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function drawTile(x, y, t, s, alpha = 1) {
@@ -473,7 +658,7 @@ function drawTile(x, y, t, s, alpha = 1) {
   g.lineWidth = 1.5; g.strokeStyle = t.lit ? '#ffe066' : '#27344a'; g.stroke();
 
   if (t.kind === 'bomb') {
-    g.font = `${s * 0.6}px "Segoe UI Emoji", sans-serif`;
+    g.font = `${s * 0.6}px ${EMOJI}`;
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText('\u{1F4A3}', cx, cy + s * 0.03);
     g.restore(); return;
@@ -574,94 +759,215 @@ function drawBoard(now) {
   g.textAlign = 'center'; g.textBaseline = 'middle';
   for (const t of texts) {
     g.globalAlpha = Math.min(1, t.life / 400);
-    g.font = `bold ${t.size}px system-ui`;
+    g.font = `bold ${t.size}px ${EMOJI}`;
     g.lineWidth = 4; g.strokeStyle = '#000'; g.strokeText(t.text, t.x, t.y);
     g.fillStyle = t.color; g.fillText(t.text, t.x, t.y);
   }
   g.globalAlpha = 1;
 }
 
-function drawPanel(now) {
-  const x = WALL + BW + WALL + 16, w = PANEL - 28;
+// ---- Side panel ------------------------------------------------------
+const PX = WALL + BW + WALL + 16, PW = PANEL - 28;
+function lab(txt, x, y) { g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillStyle = '#6f7d96'; g.font = '700 10px system-ui'; g.fillText(txt, x, y); }
+function drawFuses(x, y) {
+  for (let i = 0; i < run.maxFuses; i++) {
+    rr(x + i * 12, y, 10, 16, 2);
+    g.fillStyle = i < run.fuses ? '#ffb347' : '#2a2f3a'; g.fill();
+  }
+}
+function drawHeader() {
   g.textAlign = 'left'; g.textBaseline = 'alphabetic';
-  const label = (txt, y) => { g.fillStyle = '#6f7d96'; g.font = '700 11px system-ui'; g.fillText(txt, x, y); };
-  g.fillStyle = '#ffe066'; g.font = '800 20px system-ui'; g.fillText('CIRCUIT DROP', x, 28);
+  g.fillStyle = '#ffe066'; g.font = '800 20px system-ui'; g.fillText('CIRCUIT DROP', PX, 28);
+  lab('РАХУНОК', PX, 54);
+  g.fillStyle = '#e8eefc'; g.font = '700 24px system-ui'; g.fillText(String(score), PX, 80);
+  g.textAlign = 'right'; g.fillStyle = '#6f7d96'; g.font = '11px system-ui'; g.fillText('рекорд ' + best, PX + PW, 80); g.textAlign = 'left';
+}
+function drawOwned(y0) {
+  lab('ВАШІ ПЕРКИ', PX, y0);
+  const own = PERKS.filter(p => pk(p.id) > 0);
+  g.font = `12px ${EMOJI}`; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  if (!own.length) { g.fillStyle = '#56637a'; g.fillText('поки немає', PX, y0 + 20); }
+  own.forEach((p, i) => {
+    g.fillStyle = '#cfd8ea';
+    g.fillText(p.icon + ' ' + p.name + (pk(p.id) > 1 ? ' x' + pk(p.id) : ''), PX, y0 + 20 + i * 18);
+  });
+}
 
-  label('SCORE', 58);
-  g.fillStyle = '#e8eefc'; g.font = '700 26px system-ui'; g.fillText(String(score), x, 86);
-  g.fillStyle = '#6f7d96'; g.font = '12px system-ui'; g.fillText('best ' + best, x, 104);
+function drawPanel(now) {
+  const x = PX, w = PW;
+  drawHeader();
 
-  label('LEVEL', 130);
-  g.fillStyle = '#6f7d96'; g.font = '700 11px system-ui'; g.fillText('CIRCUITS', x + 66, 130);
-  g.fillStyle = '#e8eefc'; g.font = '700 20px system-ui';
-  g.fillText(String(level), x, 154);
-  g.fillText(String(circuits), x + 66, 154);
+  lab('ЕТАП', x, 108); lab('ІСКРИ', x + 52, 108); lab('ЗАПОБІЖНИКИ', x + 112, 108);
+  g.fillStyle = '#e8eefc'; g.font = '700 18px system-ui'; g.fillText(run.stage + '/' + STAGES, x, 132);
+  g.fillStyle = '#7fd6ff'; g.fillText('◆ ' + run.sparks, x + 52, 132);
+  drawFuses(x + 112, 118);
 
-  label('NEXT', 184);
-  for (let i = 0; i < queue.length; i++) drawTile(x + (i === 0 ? 0 : 6), 192 + i * 46 + (i ? 6 : 0), queue[i], i === 0 ? 44 : 38, i === 0 ? 1 : 0.7);
+  lab('ЦІЛЬ', x, 156);
+  g.textAlign = 'right'; g.fillStyle = '#cfd8ea'; g.font = '700 11px system-ui';
+  g.fillText(stageScore + ' / ' + goal(), x + w, 156); g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(x, 162, w, 12, 4); g.fill();
+  const gp = Math.min(1, stageScore / goal());
+  if (gp > 0.01) { g.fillStyle = gp >= 1 ? '#7dffb0' : '#ffe066'; rr(x, 162, Math.max(8, w * gp), 12, 4); g.fill(); }
 
-  label('HOLD', 352);
-  rr(x, 360, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
-  if (hold) drawTile(x, 360, hold, 52, canHold ? 1 : 0.4);
+  lab('ДАЛІ', x, 198);
+  for (let i = 0; i < queue.length; i++) drawTile(x + (i === 0 ? 0 : 6), 206 + i * 46 + (i ? 6 : 0), queue[i], i === 0 ? 44 : 38, i === 0 ? 1 : 0.7);
 
-  label('VOLTAGE', 440);
-  g.fillStyle = '#18202e'; rr(x, 448, w, 16, 4); g.fill();
+  lab('ЗАПАС', x, 364);
+  rr(x, 372, 52, 52, 6); g.strokeStyle = canHold ? '#2e3d57' : '#5a2a2a'; g.lineWidth = 1.5; g.stroke();
+  if (hold) drawTile(x, 372, hold, 52, canHold ? 1 : 0.4);
+
+  lab('НАПРУГА', x, 444);
+  g.fillStyle = '#18202e'; rr(x, 452, w, 16, 4); g.fill();
   const hue = 130 - 130 * Math.min(1, volt / 0.9);
   g.fillStyle = `hsl(${hue},85%,55%)`;
-  if (volt > 0.01) { rr(x, 448, Math.max(8, w * volt), 16, 4); g.fill(); }
+  if (volt > 0.01) { rr(x, 452, Math.max(8, w * volt), 16, 4); g.fill(); }
 
-  label('CHARGE', 486);
-  g.textAlign = 'right'; g.fillStyle = '#3de0d0'; g.font = '700 12px system-ui';
-  g.fillText('⚡'.repeat(charges), x + w, 486); g.textAlign = 'left';
-  g.fillStyle = '#18202e'; rr(x, 494, w, 14, 4); g.fill();
+  lab('ЗАРЯД', x, 488);
+  g.textAlign = 'right'; g.fillStyle = '#3de0d0'; g.font = `700 12px ${EMOJI}`;
+  g.fillText('⚡'.repeat(charges), x + w, 488); g.textAlign = 'left';
+  g.fillStyle = '#18202e'; rr(x, 496, w, 14, 4); g.fill();
   if (charge > 1) {
     g.globalAlpha = charges > 0 ? 0.75 + 0.25 * Math.sin(now / 150) : 1;
-    g.fillStyle = '#3de0d0'; rr(x, 494, Math.max(8, w * charge / 100), 14, 4); g.fill();
+    g.fillStyle = '#3de0d0'; rr(x, 496, Math.max(8, w * charge / 100), 14, 4); g.fill();
     g.globalAlpha = 1;
   }
-  const powers = [['ZAP', topInCol(cur ? cur.col : 0) >= 0], ['UNDO', undoable()], ['CROSS', !!cur]];
+  const powers = [['УДАР', topInCol(cur ? cur.col : 0) >= 0], ['НАЗАД', undoable()], ['ХРЕСТ', !!cur]];
   const bw = (w - 8) / 3;
   powers.forEach(([name, usable], i) => {
     const bx = x + i * (bw + 4), ok = charges > 0 && usable;
-    rr(bx, 516, bw, 30, 5);
+    rr(bx, 520, bw, 28, 5);
     g.fillStyle = ok ? '#12403d' : '#141b27'; g.fill();
     g.strokeStyle = ok ? '#3de0d0' : '#27344a'; g.lineWidth = 1.5; g.stroke();
     g.fillStyle = ok ? '#aef5ee' : '#56637a'; g.font = '700 11px system-ui'; g.textAlign = 'center';
-    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 535); g.textAlign = 'left';
+    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 538); g.textAlign = 'left';
   });
 
   g.fillStyle = '#6f7d96'; g.font = '11px system-ui';
-  const help = ['← → move   ↑/X rotate   Z back', '↓ soft   Space drop   C hold', '1-3 power   P pause   M mute   R reset'];
+  const help = ['← → рух  ↑/X поворот  Z назад', '↓ вниз  Пробіл скинути  C запас', '1-3 сила  I перки  P пауза  M звук'];
   help.forEach((s, i) => g.fillText(s, x, 572 + i * 17));
 }
 
-function overlay(title, sub1, sub2) {
-  g.fillStyle = 'rgba(8,11,18,0.78)'; g.fillRect(WALL, 0, BW, BH);
+function drawShopPanel() {
+  drawHeader();
+  lab('ІСКРИ', PX, 108); lab('ЗАПОБІЖНИКИ', PX + 90, 108);
+  g.fillStyle = '#7fd6ff'; g.font = '700 20px system-ui'; g.fillText('◆ ' + run.sparks, PX, 134);
+  drawFuses(PX + 90, 120);
+  drawOwned(166);
+}
+
+// ---- Shop screen -----------------------------------------------------
+function drawShop() {
+  shopHits = [];
+  const x0 = WALL + 12, w = BW - 24, cx = WALL + BW / 2;
+  g.fillStyle = '#0d1320'; g.fillRect(WALL, 0, BW, BH);
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.fillStyle = '#ffe066'; g.font = '800 34px system-ui'; g.fillText(title, WALL + BW / 2, BH / 2 - 46);
-  g.fillStyle = '#e8eefc'; g.font = '16px system-ui'; g.fillText(sub1, WALL + BW / 2, BH / 2 - 4);
-  g.fillStyle = '#9fb0cc'; g.font = '13px system-ui'; g.fillText(sub2, WALL + BW / 2, BH / 2 + 24);
+  g.fillStyle = '#7dffb0'; g.font = '800 22px system-ui'; g.fillText('ЕТАП ' + run.stage + ' ПРОЙДЕНО', cx, 26);
+  g.fillStyle = '#9fb0cc'; g.font = '13px system-ui';
+  g.fillText('+' + summary.reward + ' ◆ бонус за етап' + (summary.interest ? '   +' + summary.interest + ' ◆ відсотки' : ''), cx, 50);
+
+  shop.offers.forEach((o, i) => {
+    const y = 68 + i * 108, h = 100, afford = run.sparks >= o.cost && !o.sold;
+    rr(x0, y, w, h, 10);
+    g.fillStyle = o.sold ? '#101722' : '#151d2b'; g.fill();
+    g.lineWidth = 2; g.strokeStyle = o.sold ? '#1f2a3b' : afford ? TIER_COLOR[o.perk.tier] : '#2a3446'; g.stroke();
+    g.globalAlpha = o.sold ? 0.35 : 1;
+    g.textAlign = 'center'; g.font = `32px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(o.perk.icon, x0 + 38, y + 40);
+    g.font = '700 11px system-ui'; g.fillStyle = '#56637a'; g.fillText('[' + (i + 1) + ']', x0 + 38, y + 80);
+    g.textAlign = 'left'; g.font = '700 17px system-ui'; g.fillStyle = '#e8eefc'; g.fillText(o.perk.name, x0 + 76, y + 26);
+    g.font = '12.5px system-ui'; g.fillStyle = '#9fb0cc';
+    wrap(o.perk.desc, w - 96).forEach((ln, j) => g.fillText(ln, x0 + 76, y + 50 + j * 17));
+    g.textAlign = 'right'; g.font = '700 17px system-ui';
+    g.fillStyle = afford ? '#7fd6ff' : '#b0525a'; g.fillText('◆ ' + o.cost, x0 + w - 14, y + 26);
+    g.font = '700 10px system-ui'; g.fillStyle = TIER_COLOR[o.perk.tier]; g.fillText(TIER_NAME[o.perk.tier], x0 + w - 14, y + h - 14);
+    g.globalAlpha = 1;
+    if (o.sold) { g.textAlign = 'center'; g.font = '800 18px system-ui'; g.fillStyle = '#7dffb0'; g.fillText('ВСТАНОВЛЕНО', x0 + w / 2, y + h / 2); }
+    else shopHits.push({ x: x0, y, w, h, fn: () => buyOffer(i) });
+  });
+
+  const by = 68 + 3 * 108 + 4, bw = (w - 12) / 2;
+  const button = (x, y, bw_, h, title, sub, ok, fn) => {
+    rr(x, y, bw_, h, 8);
+    g.fillStyle = ok ? '#17233a' : '#121823'; g.fill();
+    g.lineWidth = 1.5; g.strokeStyle = ok ? '#4a6fa5' : '#232d3f'; g.stroke();
+    g.textAlign = 'center'; g.fillStyle = ok ? '#e8eefc' : '#56637a'; g.font = '700 14px system-ui'; g.fillText(title, x + bw_ / 2, y + h / 2 - 8);
+    g.fillStyle = ok ? '#7fd6ff' : '#56637a'; g.font = '12px system-ui'; g.fillText(sub, x + bw_ / 2, y + h / 2 + 10);
+    shopHits.push({ x, y, w: bw_, h, fn });
+  };
+  const full = run.fuses >= run.maxFuses;
+  button(x0, by, bw, 48, '[4] Полагодити', full ? 'усі цілі' : 'запобіжник  ◆ ' + repairCost(), !full && run.sparks >= repairCost(), buyRepair);
+  button(x0 + bw + 12, by, bw, 48, '[5] Оновити', 'пропозиції  ◆ ' + rerollCost(), run.sparks >= rerollCost(), rerollShop);
+
+  const ny = by + 60, boss = run.stage + 1 === STAGES;
+  rr(x0, ny, w, 52, 10);
+  g.fillStyle = boss ? '#3a1a1a' : '#1d3a2a'; g.fill();
+  g.lineWidth = 2; g.strokeStyle = boss ? '#ff6a5a' : '#7dffb0'; g.stroke();
+  g.textAlign = 'center'; g.fillStyle = '#e8eefc'; g.font = '800 16px system-ui';
+  g.fillText((boss ? 'ФІНАЛЬНИЙ ЕТАП' : 'ЕТАП ' + (run.stage + 1)) + '  •  ціль ' + GOALS[run.stage], cx, ny + 19);
+  g.fillStyle = '#9fb0cc'; g.font = '12px system-ui';
+  g.fillText(boss ? 'Ізолятори множаться. Enter або клік.' : 'Натисніть Enter або клацніть, щоб продовжити', cx, ny + 38);
+  shopHits.push({ x: x0, y: ny, w, h: 52, fn: nextStage });
+
+  if (shop.msg) { g.fillStyle = shop.ok ? '#7dffb0' : '#ff8a8a'; g.font = '13px system-ui'; g.fillText(shop.msg, cx, ny + 70); }
+}
+
+function drawPerkOverlay() {
+  g.fillStyle = 'rgba(8,11,18,0.92)'; g.fillRect(WALL, 0, BW, BH);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#ffe066'; g.font = '800 22px system-ui'; g.fillText('ВАШІ ПЕРКИ', WALL + BW / 2, 26);
+  const own = PERKS.filter(p => pk(p.id) > 0);
+  g.textAlign = 'left';
+  if (!own.length) { g.fillStyle = '#56637a'; g.font = '14px system-ui'; g.fillText('Поки немає. Пройдіть етап і зайдіть до магазину.', WALL + 24, 70); }
+  own.forEach((p, i) => {
+    const y = 60 + i * 29;
+    g.font = `15px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(p.icon, WALL + 18, y);
+    g.font = '700 13px system-ui'; g.fillText(p.name + (pk(p.id) > 1 ? '  x' + pk(p.id) : ''), WALL + 46, y - 6);
+    g.font = '10.5px system-ui'; g.fillStyle = '#8b99b3'; g.fillText(p.desc, WALL + 46, y + 8);
+  });
+  g.textAlign = 'center'; g.fillStyle = '#6f7d96'; g.font = '12px system-ui'; g.fillText('Натисніть I, щоб закрити', WALL + BW / 2, BH - 16);
+}
+
+function overlay(title, sub1, sub2, color = '#ffe066') {
+  g.fillStyle = 'rgba(8,11,18,0.82)'; g.fillRect(WALL, 0, BW, BH);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = color; g.font = '800 34px system-ui'; g.fillText(title, WALL + BW / 2, BH / 2 - 56);
+  g.fillStyle = '#e8eefc'; g.font = '16px system-ui'; g.fillText(sub1, WALL + BW / 2, BH / 2 - 12);
+  g.fillStyle = '#9fb0cc'; g.font = '13px system-ui';
+  sub2.split('\n').forEach((ln, i) => g.fillText(ln, WALL + BW / 2, BH / 2 + 18 + i * 20));
 }
 
 function draw(now) {
   g.fillStyle = '#0b0f17'; g.fillRect(0, 0, CW, CH);
   drawWall(0, true);
   drawWall(WALL + BW, false);
+  if (state === 'shop') { drawShop(); drawShopPanel(); return; }
   drawBoard(now);
   drawPanel(now);
-  if (state === 'ready') overlay('CIRCUIT DROP', 'Connect + to − to clear the network', 'Press Enter to start');
-  else if (state === 'over') overlay('OVERLOAD', 'Score ' + score + (score >= best ? '  (new best!)' : ''), 'Press Enter to play again');
-  else if (paused) overlay('PAUSED', 'Press P to resume', '');
+  const perkCount = PERKS.reduce((n, p) => n + pk(p.id), 0);
+  if (state === 'ready') overlay('CIRCUIT DROP', 'З’єднайте + з −, щоб очистити мережу', 'Пройдіть 9 етапів.\nВитрачайте іскри на перки між етапами.\nEnter або клік — почати', '#ffe066');
+  else if (state === 'over') overlay('КІНЕЦЬ ЗАБІГУ', 'Етап ' + run.stage + ' / ' + STAGES + '   •   Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків зібрано: ' + perkCount + '\nEnter або клік — новий забіг', '#ff6a5a');
+  else if (state === 'victory') overlay('ЗАБІГ ПРОЙДЕНО!', 'Рахунок ' + score, (score > 0 && score >= best ? '★ Новий рекорд!\n' : '') + 'Перків: ' + perkCount + ', запобіжників: ' + run.fuses + '\nEnter або клік — новий забіг', '#7dffb0');
+  else if (state === 'stagewin') {
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.lineWidth = 6; g.strokeStyle = '#000'; g.fillStyle = '#7dffb0'; g.font = '800 34px system-ui';
+    g.strokeText(run.stage === STAGES ? 'ФІНАЛ ПРОЙДЕНО!' : 'ЕТАП ПРОЙДЕНО!', WALL + BW / 2, BH / 2);
+    g.fillText(run.stage === STAGES ? 'ФІНАЛ ПРОЙДЕНО!' : 'ЕТАП ПРОЙДЕНО!', WALL + BW / 2, BH / 2);
+  }
+  else if (showPerks) drawPerkOverlay();
+  else if (paused) overlay('ПАУЗА', 'Натисніть P, щоб продовжити', '');
 }
 
 // ---- Main loop ------------------------------------------------------
-grid = emptyGrid(); queue = []; hold = null; canHold = true;
+grid = emptyGrid(); queue = []; hold = null; canHold = true; bag = [];
 score = 0; level = 1; circuits = 0; chain = 0;
 let last = performance.now();
+const IDLE = ['ready', 'over', 'shop', 'victory'];
 function frame(now) {
   const dt = Math.min(50, now - last); last = now;
-  if (!paused && state !== 'ready' && state !== 'over') update(dt);
-  else if (state === 'over') { updateFx(dt); animTiles(dt); }
+  if (!paused && !IDLE.includes(state)) update(dt);
+  else if (IDLE.includes(state)) {
+    if (state === 'victory' && Math.random() < dt / 120) burst(WALL + Math.random() * BW, Math.random() * BH * 0.7, ['#ffe066', '#7dffb0', '#6db4ff', '#ff9bd0'][(Math.random() * 4) | 0], 12);
+    updateFx(dt); animTiles(dt);
+  }
   draw(now);
   requestAnimationFrame(frame);
 }
