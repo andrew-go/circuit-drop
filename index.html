@@ -140,6 +140,61 @@ function rollBoss(tier, forceId, forceExtras) {
 }
 function rollBosses() { const o = {}; for (const st in BOSS_TIER) o[st] = rollBoss(BOSS_TIER[st]); return o; }
 
+// ---- Powers: the player equips 3 of these at the start of a run; each use costs one charge ----------
+const POWER_ORDER = ['zap', 'rotate', 'reroll', 'freeze', 'cross'];
+const POWERS = {
+  zap: {
+    icon: '\u{1F4A5}', name: 'УДАР', desc: 'Знищує верхню плитку колонки, над якою ви стоїте.',
+    usable: () => topInCol(cur.col) >= 0,
+    use() {
+      const r = topInCol(cur.col);
+      grid[r][cur.col] = null;
+      for (let y = cur.row; y <= r; y++) burst(WALL + (cur.col + 0.5) * T, (y + 0.5) * T, '#3de0d0', 3);
+      popText('УДАР!', WALL + (cur.col + 0.5) * T, r * T + 10, '#3de0d0', 18);
+      updateFlags(flood(true)); beep(900, 0.18, 'sawtooth', 0.04, -600);
+    },
+  },
+  rotate: {
+    icon: '\u{1F504}', name: 'ПОВОРОТ', desc: 'Повертає верхню плитку колонки на 90°. Може замкнути коло.',
+    usable: () => { const r = topInCol(cur.col); return r >= 0 && grid[r][cur.col].mask !== 0; },
+    use() {
+      const col = cur.col, r = topInCol(col), t = grid[r][col];
+      t.mask = rotCW(t.mask);
+      popText('ПОВОРОТ', WALL + (col + 0.5) * T, r * T + 10, '#3de0d0', 16); beep(640, 0.12, 'sine', 0.05, 200);
+      const cells = closedCells();
+      if (cells.length) {                       // the turn closed a circuit: keep the falling tile for next, then clear
+        queue.unshift(cur.tile); queue.length = 3; cur = null; chain = 0; chainTiles = 0;
+        startClear(cells, 'circuit');
+      } else updateFlags(flood(true));
+    },
+  },
+  reroll: {
+    icon: '\u{1F3B2}', name: 'НОВА', desc: 'Замінює плитку, що падає, на найкращу з трьох нових.',
+    usable: () => true,
+    use() {
+      let best = null, bf = -Infinity;
+      for (let i = 0; i < 3; i++) { const t = drawNormal(), f = tileFit(t); if (f > bf) { bf = f; best = t; } }
+      cur.tile = best;
+      popText('НОВА', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18); beep(560, 0.12, 'triangle', 0.05, 300);
+    },
+  },
+  freeze: {
+    icon: '\u{1F9CA}', name: 'СТОП', desc: 'Зупиняє падіння на 6 секунд, а боси пропускають наступний хід.',
+    usable: () => run.freezeT <= 0,
+    use() {
+      run.freezeT = 6000; run.skipTurn = true;
+      popText('СТОП', WALL + BW / 2, 70, '#8fd8ff', 22); beep(300, 0.3, 'sine', 0.05, 200);
+    },
+  },
+  cross: {
+    icon: '\u271A', name: 'ХРЕСТ', desc: 'Перетворює плитку, що падає, на хрестовину.',
+    usable: () => true,
+    use() {
+      const t = cur.tile; t.kind = 'normal'; t.mask = 15; t.hp = 1;
+      popText('ХРЕСТ', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18); beep(700, 0.15, 'sine', 0.05, 300);
+    },
+  },
+};
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
 const pInsulator   = () => Math.min(0.3, (BAL.insBase + BAL.insStep * (level - 1)) * (hasMod('rain') ? run.cfg.rainMul : 1) * (pk('clean') ? 0.5 : 1));
 const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
@@ -252,6 +307,8 @@ let particles = [], texts = [], wallGlow = 0, volt = 0, best = 0;
 let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked power-ups, undo target
 let heat = 0;                   // chosen on the title / result screens (0..HEAT_MAX)
 try { heat = Math.max(0, Math.min(HEAT_MAX, +localStorage.getItem('circuitDropHeat') || 0)); } catch (e) {}
+let loadout = ['zap', 'rotate', 'cross'], pickSel = [];   // the 3 powers equipped for the run, and the screen's current pick
+try { const l = JSON.parse(localStorage.getItem('circuitDropLoadout')); if (Array.isArray(l) && l.length === 3 && l.every(id => id in POWERS)) loadout = l; } catch (e) {}
 let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [], menuHits = [];
 let stageMaxChain = 0, chainWarned = false, driftAcc = 0, staticAcc = 0;
 try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
@@ -259,7 +316,7 @@ try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
 function freshRun() {
   return { stage: 1, fuses: BAL.fuses, maxFuses: BAL.fuses, sparks: 0, perks: {}, netUsed: false, repairs: 0,
            heat, plan: {}, mods: [], deadRows: [], sinceRise: 0, machines: [], cfg: {}, frost: { col: -1, turns: 0 }, turnNo: 0,
-           bosses: rollBosses() };
+           bosses: rollBosses(), loadout: loadout.slice(), freezeT: 0, skipTurn: false };
 }
 function pk(id) { return (run && run.perks[id]) || 0; }
 const goalFor = s => Math.round(GOALS[s - 1] * (1 + HEAT_GOAL * run.heat) / 10) * 10;
@@ -338,6 +395,20 @@ function makeNext() {
 }
 
 // ---- Run / stage flow -----------------------------------------------
+function openLoadout() { pickSel = loadout.slice(); paused = false; state = 'loadout'; }
+function togglePick(id) {
+  const i = pickSel.indexOf(id);
+  if (i >= 0) pickSel.splice(i, 1);
+  else if (pickSel.length < 3) pickSel.push(id);
+  else { beep(170, 0.1, 'sawtooth', 0.05); return; }
+  beep(520, 0.05, 'square', 0.03);
+}
+function startWithLoadout() {
+  if (pickSel.length !== 3) { beep(170, 0.1, 'sawtooth', 0.05); return; }
+  loadout = pickSel.slice();
+  try { localStorage.setItem('circuitDropLoadout', JSON.stringify(loadout)); } catch (e) {}
+  newRun();
+}
 function newRun() {
   run = freshRun();
   score = 0; circuits = 0; hold = null; charge = 0; charges = 0; bag = []; queue = []; canHold = true;
@@ -351,6 +422,7 @@ function startStage() {
   run.netUsed = false; level = run.stage; run.sinceRise = 0;
   run.mods = modsFor(run.stage);
   run.cfg = buildCfg(run.stage, run.mods);
+  run.freezeT = 0; run.skipTurn = false;
   run.turnNo = 0; run.scanTurns = 0; run.corrodeCount = 0; run.frostCount = 0; run.frost = { col: -1, turns: 0 };
   run.turnsLeft = run.cfg.turnLimit || 0;
   run.machines = [];
@@ -454,7 +526,9 @@ function timerTurn() {
 function spawn() {
   canHold = true;
   if (hasMod('rising') && run.sinceRise >= riseEvery()) { run.sinceRise = 0; risePush(); return; }
-  if (run.turnNo++ > 0) {                       // boss skills act once per tile, but not on the very first one
+  const acting = run.turnNo++ > 0;               // boss skills act once per tile, but not on the very first one
+  if (acting && run.skipTurn) { run.skipTurn = false; popText('БОС ПРОПУСТИВ ХІД', WALL + BW / 2, 30, '#8fd8ff', 16); }
+  else if (acting) {
     for (const m of run.machines) machineTurn(m);
     if (hasMod('scanner') && ++run.scanTurns % run.cfg.scanEvery === 0) scanShift();
     if (hasMod('frost')) frostTurn();
@@ -784,36 +858,11 @@ function addCharge(n) {
   return n;
 }
 const topInCol = c => { for (let r = 0; r < ROWS; r++) if (grid[r][c]) return r; return -1; };
-const undoable = () => !!(cur && lastLock && grid[lastLock.row][lastLock.col] === lastLock.tile);
-
 function usePower(i) {
-  if (charges <= 0 || !cur || state !== 'play') return;
-  let ok = false;
-  if (i === 0) {                                // ZAP: delete the top tile of the column you're over
-    const r = topInCol(cur.col);
-    if (r >= 0) {
-      grid[r][cur.col] = null;
-      for (let y = cur.row; y <= r; y++) burst(WALL + (cur.col + 0.5) * T, (y + 0.5) * T, '#3de0d0', 3);
-      popText('УДАР!', WALL + (cur.col + 0.5) * T, r * T + 10, '#3de0d0', 18);
-      updateFlags(flood(true)); beep(900, 0.18, 'sawtooth', 0.04, -600); ok = true;
-    }
-  } else if (i === 1) {                         // UNDO: take back the last drop
-    if (undoable()) {
-      const L = lastLock;
-      grid[L.row][L.col] = null;
-      queue.unshift(cur.tile); queue.length = 3;
-      L.tile.cl = L.tile.cr = false;
-      startPiece(L.tile); lastLock = null;
-      updateFlags(flood(true));
-      popText('НАЗАД', WALL + (L.col + 0.5) * T, L.row * T + 10, '#3de0d0', 18);
-      beep(300, 0.2, 'triangle', 0.05, 400); ok = true;
-    }
-  } else {                                      // CROSS: turn the falling tile into a 4-way junction
-    const t = cur.tile; t.kind = 'normal'; t.mask = 15; t.hp = 1;
-    popText('ХРЕСТ', WALL + (cur.col + 0.5) * T, cur.row * T + 10, '#3de0d0', 18);
-    beep(700, 0.15, 'sine', 0.05, 300); ok = true;
-  }
-  if (ok) { charges--; if (charge >= 100) charge = 0; }
+  const P = POWERS[run.loadout[i]];
+  if (!P || charges <= 0 || !cur || state !== 'play' || paused || !P.usable()) return;
+  P.use();
+  charges--; if (charge >= 100) charge = 0;
 }
 
 function startClear(cells, kind) {
@@ -935,6 +984,12 @@ function updateFx(dt) {
 const keys = new Set();
 function updatePlay(dt) {
   if (!cur) return;
+  if (run.freezeT > 0) {                        // Freeze power: nothing falls, drifts or turns; you can still move and rotate
+    run.freezeT -= dt;
+    cur.y += (cur.row - cur.y) * Math.min(1, dt * 0.03);
+    curX += (cur.col - curX) * Math.min(1, dt * 0.04);
+    return;
+  }
   if (hasMod('drift')) {                        // Drift: the falling tile gets nudged sideways now and then
     driftAcc += dt;
     if (driftAcc >= (run.cfg.driftMs || 2400)) {
@@ -996,10 +1051,16 @@ addEventListener('keydown', e => {
   keys.add(e.code);
   if (e.code === 'KeyM') { muted = !muted; return; }
   if (state === 'ready' || state === 'over' || state === 'victory') {
-    if (e.code === 'Enter') newRun();           // Enter only, so a mashed Space can't skip the result screen
+    if (e.code === 'Enter') openLoadout();      // Enter only, so a mashed Space can't skip the result screen
     else if (e.code === 'ArrowLeft') setHeat(heat - 1);
     else if (e.code === 'ArrowRight') setHeat(heat + 1);
     else if (/^Digit[0-3]$/.test(e.code)) setHeat(+e.code.slice(5));
+    return;
+  }
+  if (state === 'loadout') {
+    const m = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
+    if (m) togglePick(POWER_ORDER[+m[1] - 1]);
+    else if (e.code === 'Enter') startWithLoadout();
     return;
   }
   if (state === 'briefing') { if (e.code === 'Enter') beginStage(); return; }
@@ -1034,10 +1095,10 @@ canvas.addEventListener('click', e => {
   const x = (e.clientX - r.left) * CW / r.width, y = (e.clientY - r.top) * CH / r.height - boardY;   // board coordinates
   if (state === 'ready' || state === 'over' || state === 'victory') {
     for (const h of menuHits) if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); return; }
-    newRun(); return;
+    openLoadout(); return;
   }
   if (state === 'briefing') { beginStage(); return; }
-  if (state === 'shop') for (const h of shopHits) {
+  if (state === 'shop' || state === 'loadout') for (const h of shopHits) {
     if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) { h.fn(); break; }
   }
 });
@@ -1315,6 +1376,11 @@ function drawBoard(now) {
     gg.addColorStop(0, 'rgba(170,190,215,0.18)'); gg.addColorStop(1, 'rgba(170,190,215,0)');
     g.fillStyle = gg; g.fillRect(WALL, 0, BW, fogH);
   }
+  if (run.freezeT > 0) {                        // frozen time
+    g.fillStyle = 'rgba(120,200,255,0.07)'; g.fillRect(WALL, 0, BW, BH);
+    g.fillStyle = '#bfe8ff'; g.font = `700 16px ${EMOJI}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('\u{1F9CA} ' + (run.freezeT / 1000).toFixed(1), WALL + BW / 2, BH - 18);
+  }
 
   for (const m of run.machines) drawMachine(m, now);
   for (const p of particles) {
@@ -1419,7 +1485,7 @@ function drawPanel(now) {
     g.fillStyle = '#3de0d0'; rr(x, 508, Math.max(8, w * charge / 100), 14, 4); g.fill();
     g.globalAlpha = 1;
   }
-  const powers = [['УДАР', topInCol(cur ? cur.col : 0) >= 0], ['НАЗАД', undoable()], ['ХРЕСТ', !!cur]];
+  const powers = run.loadout.map(id => [POWERS[id].name, !!cur && POWERS[id].usable()]);
   const bw = (w - 8) / 3;
   powers.forEach(([name, usable], i) => {
     const bx = x + i * (bw + 4), ok = charges > 0 && usable;
@@ -1427,7 +1493,8 @@ function drawPanel(now) {
     g.fillStyle = ok ? '#12403d' : '#141b27'; g.fill();
     g.strokeStyle = ok ? '#3de0d0' : '#27344a'; g.lineWidth = 1.5; g.stroke();
     g.fillStyle = ok ? '#aef5ee' : '#56637a'; g.font = '700 11px system-ui'; g.textAlign = 'center';
-    g.fillText((i + 1) + ' ' + name, bx + bw / 2, 548); g.textAlign = 'left';
+    const lbl = (i + 1) + ' ' + name; if (g.measureText(lbl).width > bw - 6) g.font = '700 9.5px system-ui';
+    g.fillText(lbl, bx + bw / 2, 548); g.textAlign = 'left';
   });
 
   g.fillStyle = '#6f7d96'; g.font = '11px system-ui';
@@ -1759,7 +1826,7 @@ function drawControls(now) {
     g.fillStyle = '#3de0d0'; rr(cx0, y0 + 20, Math.max(8, half * charge / 100), 12, 4); g.fill(); g.globalAlpha = 1;
   }
   const bw = (w - 16) / 3, xs = [12, 12 + bw + 8, 12 + 2 * (bw + 8)];
-  const powers = [['\u0423\u0414\u0410\u0420', topInCol(cur ? cur.col : 0) >= 0], ['\u041d\u0410\u0417\u0410\u0414', undoable()], ['\u0425\u0420\u0415\u0421\u0422', !!cur]];
+  const powers = run.loadout.map(id => [POWERS[id].icon + ' ' + POWERS[id].name, !!cur && POWERS[id].usable()]);
   powers.forEach(([name, usable], i) => touchButton(xs[i], y0 + 42, bw, 38, name, 'p' + i, charges > 0 && usable, 14));
   touchButton(xs[0], y0 + 88, bw, 56, '\u25C0', 'left', true, 24);
   touchButton(xs[1], y0 + 88, bw, 56, '\u21BB', 'rot', true, 28);
@@ -1811,17 +1878,53 @@ function drawOverlays() {
   if (state === 'ready' || state === 'over' || state === 'victory') drawHeatPicker();
 }
 
+// Pick 3 of the powers before a run starts.
+function drawLoadout() {
+  shopHits = [];
+  const x0 = WALL + 12, w = BW - 24, cx = WALL + BW / 2;
+  g.fillStyle = '#0d1320'; g.fillRect(WALL, 0, BW, BH);
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#7fd6ff'; g.font = '800 22px system-ui'; g.fillText('ОБЕРІТЬ 3 СИЛИ', cx, 26);
+  g.fillStyle = '#9fb0cc'; g.font = '12px system-ui'; g.fillText('Заряд дає хороша гра. Одна сила = один заряд.', cx, 48);
+  POWER_ORDER.forEach((id, i) => {
+    const P = POWERS[id], y = 64 + i * 88, h = 80, k = pickSel.indexOf(id), on = k >= 0;
+    rr(x0, y, w, h, 10);
+    g.fillStyle = on ? '#14322a' : '#151d2b'; g.fill();
+    g.lineWidth = 2; g.strokeStyle = on ? '#7dffb0' : '#2a3446'; g.stroke();
+    g.textAlign = 'center'; g.font = `30px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(P.icon, x0 + 36, y + 36);
+    g.font = '700 11px system-ui'; g.fillStyle = '#56637a'; g.fillText(kb(i + 1).trim(), x0 + 36, y + 66);
+    g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.font = '700 16px system-ui'; g.fillStyle = '#e8eefc'; g.fillText(P.name, x0 + 72, y + 26);
+    g.font = '12px system-ui'; g.fillStyle = '#9fb0cc';
+    wrap(P.desc, w - 120).forEach((ln, j) => g.fillText(ln, x0 + 72, y + 46 + j * 16));
+    if (on) {                                   // slot number the power gets (keys 1-3)
+      g.beginPath(); g.arc(x0 + w - 24, y + 24, 14, 0, 7); g.fillStyle = '#7dffb0'; g.fill();
+      g.fillStyle = '#06210f'; g.font = '800 15px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(k + 1), x0 + w - 24, y + 25);
+    }
+    g.textBaseline = 'middle';
+    shopHits.push({ x: x0, y, w, h, fn: () => togglePick(id) });
+  });
+  const by = 64 + 5 * 88 + 4, ok = pickSel.length === 3;
+  rr(x0, by, w, 52, 10);
+  g.fillStyle = ok ? '#1d3a2a' : '#121823'; g.fill();
+  g.lineWidth = 2; g.strokeStyle = ok ? '#7dffb0' : '#232d3f'; g.stroke();
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = ok ? '#e8eefc' : '#56637a'; g.font = '800 16px system-ui';
+  g.fillText(ok ? (TOUCH ? 'Почати забіг' : 'Enter \u2014 почати забіг') : 'Оберіть ще ' + (3 - pickSel.length), cx, by + 20);
+  g.font = '11px system-ui'; g.fillStyle = ok ? '#9fb0cc' : '#3a4558';
+  g.fillText(ok ? 'Сили працюють на клавішах 1, 2, 3 у вказаному порядку' : 'Торкніться сили, щоб обрати або зняти вибір', cx, by + 39);
+  shopHits.push({ x: x0, y: by, w, h: 52, fn: startWithLoadout });
+}
+
 function draw(now) {
   g.fillStyle = '#0b0f17'; g.fillRect(0, 0, CW, CH);
   uiHits = [];
   g.save(); g.translate(0, boardY);              // everything board-related is drawn in board coordinates
   drawWall(0, true);
   drawWall(WALL + BW, false);
-  if (state === 'shop') { drawShop(); if (!portrait) drawShopPanel(); }
+  if (state === 'shop' || state === 'loadout') { (state === 'shop' ? drawShop : drawLoadout)(); if (!portrait) drawShopPanel(); }
   else { drawBoard(now); if (!portrait) drawPanel(now); drawOverlays(); }
   g.restore();
   if (portrait) {
-    if (state === 'shop') { drawHudShop(); drawPerkStrip(); }
+    if (state === 'shop' || state === 'loadout') { drawHudShop(); drawPerkStrip(); }
     else { drawHud(now); drawControls(now); }
   }
 }
@@ -1830,7 +1933,7 @@ function draw(now) {
 grid = emptyGrid(); queue = []; hold = null; canHold = true; bag = [];
 score = 0; level = 1; circuits = 0; chain = 0;
 let last = performance.now();
-const IDLE = ['ready', 'over', 'shop', 'victory', 'briefing'];
+const IDLE = ['ready', 'over', 'shop', 'victory', 'briefing', 'loadout'];
 function frame(now) {
   const dt = Math.min(50, now - last); last = now;
   if (innerWidth !== layoutW || innerHeight !== layoutH) setLayout();   // also catches mobile URL-bar resizes
