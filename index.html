@@ -33,9 +33,12 @@ const LOCK_DELAY = 450;                  // ms before a resting tile locks
 const SETTLE_SPEED = 0.014;              // rows/ms for tiles falling after a clear
 
 // ---- Run structure (tune these first when balancing) ----------------
-const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 2000];   // score per stage; the last is the boss
+const GOALS = [250, 340, 450, 580, 700, 830, 960, 1090, 1150];   // score per stage; the last is the boss
 const STAGES = GOALS.length;
 const START_FUSES = 3;
+// Balance knobs in one place. mercy[stage-1] = how many candidate tiles are drawn, keeping the best fit (1 = pure random).
+const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, insBase: 0.03, insStep: 0.012,
+              mercy: [4, 3, 2, 3, 2, 2, 2, 2, 3] };   // bosses (3, 6, 9) get less help than the stages around them
 const STAGE_BONUS = 8, STAGE_BONUS_PER = 2;   // sparks for clearing a stage: 8 + 2 * stage
 const SPARKS_PER_CIRCUIT = 2;                 // plus 1 per extra chain step
 const ALL_CLEAR_MIN = 10, ALL_CLEAR_BASE = 100, ALL_CLEAR_PER = 40;   // emptying the board after clearing 10+ tiles
@@ -47,13 +50,11 @@ const TIER_NAME = { 1: 'ЗВИЧАЙНИЙ', 2: 'НЕЗВИЧАЙНИЙ', 3: 'Р
 const TIER_COLOR = { 1: '#8b99b3', 2: '#6db4ff', 3: '#ffb347' };
 
 // ---- Bosses, modifiers and heat -------------------------------------
-const RISE_EVERY = 10;                        // pieces between rising insulator rows
-const RISE_GAPS = 2;                          // empty cells left in each risen row
 const DEAD_ROWS = 3, DEAD_ROW_FROM = 4;       // dead rows are picked among rows DEAD_ROW_FROM..ROWS-1
 const DRIFT_MS = 2400;                        // how often a falling tile may get nudged sideways
 const HEAT_MAX = 3, HEAT_GOAL = 0.15, HEAT_SPARKS = 0.15, HEAT_FROM_STAGE = 5;
 const MODS = {
-  rising:   { icon: '\u{1F9F1}',         name: 'Підйом ізоляторів', desc: 'Кожні 10 плиток знизу випирає ряд ізоляторів. Не дайте стопці дійти до верху.' },
+  rising:   { icon: '\u{1F9F1}',         name: 'Підйом ізоляторів', desc: 'Через кожні кілька плиток знизу випирає ряд ізоляторів. Стежте за лічильником й не дайте стопці дійти до верху.' },
   blind:    { icon: '\u{1F576}\uFE0F',  name: 'Затемнення',        desc: 'Наступні плитки приховані. Спирайтеся на запас.' },
   deadrows: { icon: '\u26D4',            name: 'Мертві ряди',       desc: '3 ряди не підключаються до стін (вони затемнені). Шукайте обхід.' },
   drift:    { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             desc: 'Падаюча плитка час від часу зсувається вбік.' },
@@ -61,23 +62,22 @@ const MODS = {
 const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
 // tips: shown on the briefing screen. {C} becomes " (C)" on a keyboard and disappears on touch.
 const BOSSES = {
-  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'],                      needChain: 2,
-       tips: ['Що таке ланцюжок ×2: ваша плитка замикає коло, воно зникає, плитки над ним падають і самі замикають ще одне коло. Два кола за один хід.',
-              'На схемі: червоне коло A сходами лежить на синьому колі B. Остання плитка замикає A, воно зникає, і B падає на дно та замикається.',
-              'Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Будуйте внизу.',
-              'Робіть ланцюжок рано, поки стопка низька.'] },
+  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'], riseEvery: 8,
+       tips: ['Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Ряд підіймається знизу й виштовхує стопку вгору.',
+              'Будуйте коло внизу: ізолятори, що торкаються кола, згорають разом із ним.',
+              'Не давайте стопці дійти до верху: переповнення коштує запобіжника. Силу УДАР можна використати, щоб прибрати зайву плитку.'] },
   6: { name: 'ЗАТЕМНЕННЯ',        mods: ['blind', 'deadrows'],
        tips: ['Наступні плитки приховані: тримайте запас{C} і прибирайте хрестовини та трійники. Вони підходять майже скрізь.',
               'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.',
               'Незручна плитка? Сила ХРЕСТ робить її чотиристоронньою. Магніт скорочує коло на колонку з кожного боку.'] },
-  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2,
-       tips: ['Потрібен ланцюжок ×2: два кола за один хід (див. схему). Ще й прихований перегляд та мертві ряди.',
-              'Робіть ланцюжок одразу, поки поле низьке, і стежте за лічильником \u{1F9F1}.',
+  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], riseEvery: 13, diagram: true,
+       tips: ['Усе разом: підйом ізоляторів, прихований перегляд і мертві ряди. Тримайте стопку низько.',
+              'Бонус: ланцюжок ×2 (схема вище) подвоює очки другого кола. Два кола за один хід: перше зникає, плитки падають і замикають друге.',
               'Прийдіть із запобіжниками, зарядом на силу й Магнітом чи Страхувальною сіткою.'] },
 };
 
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
-const pInsulator   = () => Math.min(0.3, (0.03 + 0.018 * (level - 1)) * (pk('clean') ? 0.5 : 1));
+const pInsulator   = () => Math.min(0.3, (BAL.insBase + BAL.insStep * (level - 1)) * (pk('clean') ? 0.5 : 1));
 const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
 const pBomb        = () => 0.03 * (pk('demo') ? 2.5 : 1);
 const maxCharges   = () => BASE_CHARGES + pk('bank');
@@ -193,7 +193,7 @@ let stageMaxChain = 0, chainWarned = false, driftAcc = 0;
 try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
 
 function freshRun() {
-  return { stage: 1, fuses: START_FUSES, maxFuses: START_FUSES, sparks: 0, perks: {}, netUsed: false, repairs: 0,
+  return { stage: 1, fuses: BAL.fuses, maxFuses: BAL.fuses, sparks: 0, perks: {}, netUsed: false, repairs: 0,
            heat, plan: {}, mods: [], deadRows: [], sinceRise: 0 };
 }
 function pk(id) { return (run && run.perks[id]) || 0; }
@@ -233,14 +233,25 @@ function refillBag() {
   }
   for (let i = bag.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [bag[i], bag[j]] = [bag[j], bag[i]]; }
 }
-function makeNext() {
-  const r = Math.random(), pi = pInsulator();
-  if (r < pi) return newTile('ins', 0);
-  if (r < pi + pBomb()) return newTile('bomb', 0);
+function drawNormal() {
   if (!bag || !bag.length) refillBag();
   let mask = bag.pop().mask;
   for (let i = (Math.random() * 4) | 0; i > 0; i--) mask = rotCW(mask);
   return newTile(Math.random() < pResistor() ? 'res' : 'normal', mask);
+}
+// Mercy: draw k candidate tiles and keep the one that fits the board best. k shrinks as the run goes on (BAL.mercy)
+// and is 1 on Heat. Insulators and bombs are rolled first and never filtered.
+function makeNext() {
+  const r = Math.random(), pi = pInsulator();
+  if (r < pi) return newTile('ins', 0);
+  if (r < pi + pBomb()) return newTile('bomb', 0);
+  const k = run.heat ? 1 : (BAL.mercy[run.stage - 1] || 1);
+  let best = drawNormal(), bestFit = k > 1 ? tileFit(best) : 0;
+  for (let i = 1; i < k; i++) {
+    const t = drawNormal(), f = tileFit(t);
+    if (f > bestFit) { best = t; bestFit = f; }
+  }
+  return best;
 }
 
 // ---- Run / stage flow -----------------------------------------------
@@ -270,9 +281,11 @@ function startStage() {
   spawn();
 }
 function beginStage() { spawn(); }
+// Bosses can set their own rising speed (riseEvery); everything else uses BAL.riseEvery.
+function riseEvery() { return (BOSSES[run.stage] && BOSSES[run.stage].riseEvery) || BAL.riseEvery; }
 function spawn() {
   canHold = true;
-  if (hasMod('rising') && run.sinceRise >= RISE_EVERY) { run.sinceRise = 0; risePush(); return; }
+  if (hasMod('rising') && run.sinceRise >= riseEvery()) { run.sinceRise = 0; risePush(); return; }
   run.sinceRise++;
   startPiece(queue.shift());
   queue.push(makeNext());
@@ -289,7 +302,7 @@ function risePush() {
     if (t) t.dy = r + 1;                        // animates upward
   }
   const gaps = new Set();
-  while (gaps.size < RISE_GAPS) gaps.add((Math.random() * COLS) | 0);
+  while (gaps.size < BAL.riseGaps) gaps.add((Math.random() * COLS) | 0);
   for (let c = 0; c < COLS; c++) {
     const t = gaps.has(c) ? null : newTile('ins', 0);
     if (t) t.dy = ROWS;
@@ -454,6 +467,69 @@ function closedCells() {
     for (const [r, c] of piece) cells.push({ r, c, d: dist.get(r * COLS + c) || 0, fired: false });
   }
   return cells;
+}
+// Minimum number of extra tiles needed to wire the + wall to the - wall: a Dijkstra over cells where existing,
+// matching tiles are free and empty cells cost 1 (a little more when they would float). 99 = no way through.
+function pathCost() {
+  const INF = 99, N = ROWS * COLS, dist = new Float32Array(N).fill(INF), done = new Uint8Array(N);
+  const cost = (r, c) => {
+    if (grid[r][c]) return 0;
+    let gap = 0; while (r + 1 + gap < ROWS && !grid[r + 1 + gap][c]) gap++;
+    return 1 + 0.5 * gap;
+  };
+  for (let r = 0; r < ROWS; r++) {
+    if (isDead(r)) continue;
+    const t = grid[r][0];
+    if (t && !(t.mask & LEFT)) continue;
+    dist[r * COLS] = cost(r, 0);
+  }
+  for (;;) {
+    let bi = -1, bd = INF;
+    for (let i = 0; i < N; i++) if (!done[i] && dist[i] < bd) { bd = dist[i]; bi = i; }
+    if (bi < 0) return INF;
+    done[bi] = 1;
+    const r = (bi / COLS) | 0, c = bi % COLS, t = grid[r][c];
+    if (c === COLS - 1 && !isDead(r) && (!t || (t.mask & RIGHT))) return bd;
+    for (const D of DIRS) {
+      if (t && !(t.mask & D.bit)) continue;
+      const nr = r + D.dr, nc = c + D.dc;
+      if (!inRange(nr, nc)) continue;
+      const n = grid[nr][nc];
+      if (n && !(n.mask & opp(D.bit))) continue;
+      const k = nr * COLS + nc, nd = bd + cost(nr, nc);
+      if (nd < dist[k]) dist[k] = nd;
+    }
+  }
+}
+// How good is it to have tile t at (r, c)? Mostly: how few tiles are still missing from the shortest path.
+function placementScore(r, c, t) {
+  const pc = pathCost();
+  let links = 0, bad = 0, blocked = 0;
+  for (const D of DIRS) {
+    const nr = r + D.dr, nc = c + D.dc;
+    if (t.mask & D.bit) {
+      if (!inRange(nr, nc)) { if (!(D.bit === LEFT || D.bit === RIGHT)) bad++; }
+      else { const n = grid[nr][nc]; if (n) { if (n.mask & opp(D.bit)) links++; else bad++; } }
+    } else if (inRange(nr, nc)) {
+      const n = grid[nr][nc]; if (n && (n.mask & opp(D.bit))) blocked++;
+    }
+  }
+  return (pc === 0 ? 1e5 : 0) - pc * 100 + links * 8 - bad * 6 - blocked * 5 - (ROWS - r) * 1.5;
+}
+// Best score this tile could get anywhere on the board, in any rotation.
+function tileFit(t) {
+  const orig = t.mask; let best = -Infinity;
+  for (let rot = 0; rot < 4; rot++) {
+    for (let c = 0; c < COLS; c++) {
+      if (grid[0][c]) continue;
+      let r = 0; while (canMove(r + 1, c)) r++;
+      grid[r][c] = t; const sc = placementScore(r, c, t); grid[r][c] = null;
+      if (sc > best) best = sc;
+    }
+    t.mask = rotCW(t.mask);
+  }
+  t.mask = orig;
+  return best;
 }
 function updateFlags(L) {
   const R = flood(false);
@@ -1059,7 +1135,7 @@ function drawPanel(now) {
   let mx = x;
   for (const id of run.mods) {
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 194); mx += 20;
-    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, RISE_EVERY - run.sinceRise)), mx, 194); mx += 16; }
+    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 194); mx += 16; }
   }
   if (chainNeed()) {
     const ok = stageMaxChain >= chainNeed();
@@ -1307,7 +1383,7 @@ function drawBossTips(b, y) {
   const layout = () => { g.font = font(); wrapped = tips.map(t => wrap(t, w - 36)); };
   layout();
   const need = withD => 30 + (withD ? DH : 0) + wrapped.reduce((n, l) => n + l.length * lh + 3, 0);
-  let showD = !!b.needChain;
+  let showD = !!b.diagram;
   if (need(showD) > bottom - y) { fs = 10.5; lh = 13; layout(); }
   if (showD && need(true) > bottom - y) showD = false;          // no room for the picture on very crowded stages
   rr(x0, y, w, bottom - y, 8); g.fillStyle = 'rgba(125,255,176,0.06)'; g.fill();
@@ -1345,7 +1421,7 @@ function drawHud(now) {
   let mx = 166;                                  // active modifiers (rising: pieces until the next push)
   for (const id of run.mods) {
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 22); mx += 20;
-    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, RISE_EVERY - run.sinceRise)), mx, 22); mx += 16; }
+    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 22); mx += 16; }
   }
   if (PLAY_STATES.includes(state)) {
     touchButton(CW - 46, 6, 34, 28, '\u{1F392}', 'perks', true, 14);
