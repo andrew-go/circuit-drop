@@ -141,7 +141,7 @@ function rollBoss(tier, forceId, forceExtras) {
 function rollBosses() { const o = {}; for (const st in BOSS_TIER) o[st] = rollBoss(BOSS_TIER[st]); return o; }
 
 // ---- Powers: the player equips 3 of these at the start of a run; each use costs one charge ----------
-const POWER_ORDER = ['zap', 'rotate', 'reroll', 'freeze', 'cross'];
+const POWER_ORDER = ['zap', 'swap', 'reroll', 'freeze', 'cross'];
 const POWERS = {
   zap: {
     icon: '\u{1F4A5}', name: 'УДАР', desc: 'Знищує верхню плитку колонки, над якою ви стоїте.',
@@ -154,19 +154,10 @@ const POWERS = {
       updateFlags(flood(true)); beep(900, 0.18, 'sawtooth', 0.04, -600);
     },
   },
-  rotate: {
-    icon: '\u{1F504}', name: 'ПОВОРОТ', desc: 'Повертає верхню плитку колонки на 90°. Може замкнути коло.',
-    usable: () => { const r = topInCol(cur.col); return r >= 0 && grid[r][cur.col].mask !== 0; },
-    use() {
-      const col = cur.col, r = topInCol(col), t = grid[r][col];
-      t.mask = rotCW(t.mask);
-      popText('ПОВОРОТ', WALL + (col + 0.5) * T, r * T + 10, '#3de0d0', 16); beep(640, 0.12, 'sine', 0.05, 200);
-      const cells = closedCells();
-      if (cells.length) {                       // the turn closed a circuit: keep the falling tile for next, then clear
-        queue.unshift(cur.tile); queue.length = 3; cur = null; chain = 0; chainTiles = 0;
-        startClear(cells, 'circuit');
-      } else updateFlags(flood(true));
-    },
+  swap: {
+    icon: '\u{1F500}', name: 'ОБМІН', desc: 'Оберіть плитку на полі стрілками, Enter: вона поміняється місцями з падаючою.',
+    usable: () => anyTile(), deferCharge: true,           // the charge is spent when you confirm, not when you start choosing
+    use() { startPick(); },
   },
   reroll: {
     icon: '\u{1F3B2}', name: 'НОВА', desc: 'Замінює плитку, що падає, на найкращу з трьох нових.',
@@ -246,6 +237,7 @@ const T_RESUME = TOUCH ? 'Торкніться, щоб продовжити' : '
 const T_CLOSE  = TOUCH ? 'Торкніться, щоб закрити' : 'Натисніть I, щоб закрити';
 const T_HEAT   = TOUCH ? 'торкайтеся стрілок, щоб змінити нагрів' : '\u2190 \u2192 або 0\u20133 \u2014 змінити нагрів';
 const kb = n => TOUCH ? '' : '[' + n + '] ';
+const T_PICK = TOUCH ? 'Торкніться плитки, ще раз \u2014 обмін' : '\u2190 \u2192 \u2191 \u2193 вибір  \u2022  Enter \u2014 обмін  \u2022  Esc \u2014 скасувати';
 const UP = 1, RIGHT = 2, DOWN = 4, LEFT = 8;
 const DIRS = [
   { bit: UP,    dr: -1, dc: 0 },
@@ -307,7 +299,7 @@ let particles = [], texts = [], wallGlow = 0, volt = 0, best = 0;
 let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked power-ups, undo target
 let heat = 0;                   // chosen on the title / result screens (0..HEAT_MAX)
 try { heat = Math.max(0, Math.min(HEAT_MAX, +localStorage.getItem('circuitDropHeat') || 0)); } catch (e) {}
-let loadout = ['zap', 'rotate', 'cross'], pickSel = [];   // the 3 powers equipped for the run, and the screen's current pick
+let loadout = ['zap', 'swap', 'cross'], pickSel = [], pick = null;   // pick = {r, c} while the Swap power is choosing   // the 3 powers equipped for the run, and the screen's current pick
 try { const l = JSON.parse(localStorage.getItem('circuitDropLoadout')); if (Array.isArray(l) && l.length === 3 && l.every(id => id in POWERS)) loadout = l; } catch (e) {}
 let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [], menuHits = [];
 let stageMaxChain = 0, chainWarned = false, driftAcc = 0, staticAcc = 0;
@@ -422,7 +414,7 @@ function startStage() {
   run.netUsed = false; level = run.stage; run.sinceRise = 0;
   run.mods = modsFor(run.stage);
   run.cfg = buildCfg(run.stage, run.mods);
-  run.freezeT = 0; run.skipTurn = false;
+  run.freezeT = 0; run.skipTurn = false; pick = null;
   run.turnNo = 0; run.scanTurns = 0; run.corrodeCount = 0; run.frostCount = 0; run.frost = { col: -1, turns: 0 };
   run.turnsLeft = run.cfg.turnLimit || 0;
   run.machines = [];
@@ -584,7 +576,7 @@ function saveBest() {
   if (score > best) { best = score; try { localStorage.setItem('circuitDropBest', best); } catch (e) {} }
 }
 function gameOver() {
-  state = 'over'; cur = null; saveBest();
+  state = 'over'; cur = null; pick = null; saveBest();
   beep(220, 0.5, 'sawtooth', 0.05, -160);
 }
 function winStage() {
@@ -860,9 +852,66 @@ function addCharge(n) {
 const topInCol = c => { for (let r = 0; r < ROWS; r++) if (grid[r][c]) return r; return -1; };
 function usePower(i) {
   const P = POWERS[run.loadout[i]];
-  if (!P || charges <= 0 || !cur || state !== 'play' || paused || !P.usable()) return;
+  if (!P || charges <= 0 || !cur || state !== 'play' || paused || pick || !P.usable()) return;
   P.use();
+  if (!P.deferCharge) { charges--; if (charge >= 100) charge = 0; }
+}
+
+// ---- Exchange power: pick any tile on the board and trade places with the falling tile -------------------
+const anyTile = () => grid.some(row => row.some(Boolean));
+function startPick() {                          // the cursor starts on the top tile of the column nearest to the falling tile
+  let best = null;
+  for (let c = 0; c < COLS; c++) {
+    const r = topInCol(c); if (r < 0) continue;
+    const d = Math.abs(c - cur.col);
+    if (!best || d < best.d) best = { r, c, d };
+  }
+  pick = { r: best.r, c: best.c };
+  beep(480, 0.08, 'triangle', 0.04);
+}
+function pickMove(dc, dr) {                     // the cursor snaps from tile to tile
+  const { r, c } = pick;
+  if (dc) {
+    for (let nc = c + dc; nc >= 0 && nc < COLS; nc += dc) {
+      let bestR = -1;
+      for (let y = 0; y < ROWS; y++) if (grid[y][nc] && (bestR < 0 || Math.abs(y - r) < Math.abs(bestR - r))) bestR = y;
+      if (bestR >= 0) { pick = { r: bestR, c: nc }; beep(300, 0.03, 'square', 0.02); return; }
+    }
+  } else if (dr) {
+    for (let nr = r + dr; nr >= 0 && nr < ROWS; nr += dr) {
+      if (grid[nr][c]) { pick = { r: nr, c }; beep(300, 0.03, 'square', 0.02); return; }
+    }
+  }
+}
+function pickCancel() { pick = null; beep(240, 0.08, 'sine', 0.03); }
+function pickConfirm() {
+  const { r, c } = pick, t = grid[r][c], falling = cur.tile;
+  if (!t) return;
+  grid[r][c] = falling; falling.dy = r; falling.cl = falling.cr = false;      // the falling tile takes the chosen tile's place
+  cur.tile = t; t.cl = t.cr = false;                                            // and the chosen tile becomes the falling one
+  popText('ОБМІН', WALL + (c + 0.5) * T, r * T + 10, '#3de0d0', 16); beep(640, 0.14, 'sine', 0.05, 300);
   charges--; if (charge >= 100) charge = 0;
+  pick = null;
+  const cells = closedCells();
+  if (cells.length) {                           // the swap closed a circuit: keep the tile in hand for next, then clear
+    queue.unshift(cur.tile); queue.length = 3; cur = null; chain = 0; chainTiles = 0;
+    startClear(cells, 'circuit');
+  } else updateFlags(flood(true));
+}
+function pickKey(e) {
+  switch (e.code) {
+    case 'ArrowLeft': case 'KeyA': pickMove(-1, 0); break;
+    case 'ArrowRight': case 'KeyD': pickMove(1, 0); break;
+    case 'ArrowUp': case 'KeyW': pickMove(0, -1); break;
+    case 'ArrowDown': case 'KeyS': pickMove(0, 1); break;
+    case 'Enter': case 'NumpadEnter': pickConfirm(); break;
+    case 'Escape': case 'KeyX': pickCancel(); break;
+  }
+}
+function pickTap(x, y) {                        // touch: tap a tile to point at it, tap it again to swap
+  const c = ((x - WALL) / T) | 0, r = (y / T) | 0;
+  if (!inRange(r, c) || !grid[r][c]) return;
+  if (pick.r === r && pick.c === c) pickConfirm(); else { pick = { r, c }; beep(300, 0.03, 'square', 0.02); }
 }
 
 function startClear(cells, kind) {
@@ -984,8 +1033,8 @@ function updateFx(dt) {
 const keys = new Set();
 function updatePlay(dt) {
   if (!cur) return;
-  if (run.freezeT > 0) {                        // Freeze power: nothing falls, drifts or turns; you can still move and rotate
-    run.freezeT -= dt;
+  if (pick || run.freezeT > 0) {                // Freeze power or Exchange choosing: nothing falls, drifts or turns
+    if (!pick) run.freezeT -= dt;
     cur.y += (cur.row - cur.y) * Math.min(1, dt * 0.03);
     curX += (cur.col - curX) * Math.min(1, dt * 0.04);
     return;
@@ -1073,6 +1122,7 @@ addEventListener('keydown', e => {
     else if (e.code === 'Enter') nextStage();
     return;
   }
+  if (pick && !paused && e.code !== 'KeyP' && e.code !== 'KeyI') { if (state === 'play') pickKey(e); return; }   // choosing a tile to swap
   if (e.code === 'KeyP' || e.code === 'Escape') { paused = !paused; showPerks = false; return; }
   if (e.code === 'KeyI') { showPerks = !showPerks; paused = showPerks; return; }
   if (paused || state !== 'play' || !cur) return;
@@ -1117,6 +1167,17 @@ function stopPress() {
   keys.delete('ArrowDown'); press.id = null; press.hit = null;
 }
 function runButton(id) {
+  if (pick) {                                   // while choosing a tile the buttons steer the cursor
+    switch (id) {
+      case 'left': pickMove(-1, 0); break;
+      case 'right': pickMove(1, 0); break;
+      case 'rot': pickMove(0, -1); break;
+      case 'soft': pickMove(0, 1); break;
+      case 'drop': pickConfirm(); break;
+      case 'hold': pickCancel(); break;
+    }
+    return;
+  }
   switch (id) {
     case 'left': actMove(-1); break;
     case 'right': actMove(1); break;
@@ -1139,13 +1200,14 @@ canvas.addEventListener('pointerdown', e => {
   for (const h of uiHits) {
     if (x < h.x || x > h.x + h.w || y < h.y || y > h.y + h.h) continue;
     stopPress(); press.id = e.pointerId; press.hit = h.id;
-    if (h.id === 'soft') keys.add('ArrowDown');
+    if (h.id === 'soft' && !pick) keys.add('ArrowDown');
     else {
       runButton(h.id);
       if (h.id === 'left' || h.id === 'right') press.timer = setTimeout(() => { press.iv = setInterval(() => runButton(h.id), 80); }, 220);
     }
     return;
   }
+  if (pick && state === 'play' && y >= boardY && y < boardY + BH) { pickTap(x, y - boardY); return; }
   if (state === 'play' && y >= boardY && y < boardY + BH) {
     stopPress(); press.id = e.pointerId; press.hit = 'board';
     press.sx = press.ax = x; press.sy = y; press.st = performance.now(); press.moved = false;
@@ -1289,6 +1351,24 @@ function drawWall(x0, left) {
   }
 }
 
+// Exchange power: blinking cursor on the chosen tile, a small preview of what will take its place, and a hint bar.
+function drawPick(now) {
+  const x = WALL + pick.c * T, y = pick.r * T, t = grid[pick.r][pick.c];
+  g.save();
+  g.fillStyle = 'rgba(8,11,18,0.4)'; g.fillRect(WALL, 0, BW, BH);                // dim the board
+  if (t) drawTile(x, y, t, T);                                                   // the chosen tile stays bright
+  g.globalAlpha = 0.55 + 0.45 * Math.sin(now / 110);
+  g.strokeStyle = '#ffe066'; g.lineWidth = 3; rr(x + 1, y + 1, T - 2, T - 2, 7); g.stroke();
+  g.globalAlpha = 1;
+  const px = Math.min(WALL + BW - 30, x + T - 14), py = Math.max(2, y - 12);       // preview: the falling tile that will go here
+  rr(px - 2, py - 2, 30, 30, 6); g.fillStyle = '#0d1320'; g.fill(); g.strokeStyle = '#ffe066'; g.lineWidth = 1.5; g.stroke();
+  drawTile(px, py, cur.tile, 26);
+  g.font = '12px system-ui'; const tw = g.measureText(T_PICK).width + 18;
+  rr(WALL + BW / 2 - tw / 2, BH - 30, tw, 22, 8); g.fillStyle = 'rgba(8,11,18,0.9)'; g.fill();
+  g.fillStyle = '#ffe066'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(T_PICK, WALL + BW / 2, BH - 19);
+  g.restore();
+}
+
 function machineSprite(cx, y, aimNum, st) {
   const aiming = st === 'aim', cooling = st === 'cool';
   g.save(); g.translate(cx, y);
@@ -1383,6 +1463,7 @@ function drawBoard(now) {
   }
 
   for (const m of run.machines) drawMachine(m, now);
+  if (pick) drawPick(now);
   for (const p of particles) {
     g.globalAlpha = Math.max(0, p.life / p.max); g.fillStyle = p.color;
     g.fillRect(p.x - 2, p.y - 2, 4, 4);
@@ -1828,12 +1909,21 @@ function drawControls(now) {
   const bw = (w - 16) / 3, xs = [12, 12 + bw + 8, 12 + 2 * (bw + 8)];
   const powers = run.loadout.map(id => [POWERS[id].icon + ' ' + POWERS[id].name, !!cur && POWERS[id].usable()]);
   powers.forEach(([name, usable], i) => touchButton(xs[i], y0 + 42, bw, 38, name, 'p' + i, charges > 0 && usable, 14));
-  touchButton(xs[0], y0 + 88, bw, 56, '\u25C0', 'left', true, 24);
-  touchButton(xs[1], y0 + 88, bw, 56, '\u21BB', 'rot', true, 28);
-  touchButton(xs[2], y0 + 88, bw, 56, '\u25B6', 'right', true, 24);
-  touchButton(xs[0], y0 + 152, bw, 44, '\u25BC швидко', 'soft', true, 14);
-  touchButton(xs[1], y0 + 152, bw, 44, '\u25BC\u25BC скинути', 'drop', true, 14);
-  touchButton(xs[2], y0 + 152, bw, 44, 'ЗАПАС', 'hold', canHold, 14);
+  if (pick) {                                   // Exchange: the buttons move the cursor
+    touchButton(xs[0], y0 + 88, bw, 56, '\u25C0', 'left', true, 24);
+    touchButton(xs[1], y0 + 88, bw, 56, '\u25B2', 'rot', true, 24);
+    touchButton(xs[2], y0 + 88, bw, 56, '\u25B6', 'right', true, 24);
+    touchButton(xs[0], y0 + 152, bw, 44, '\u25BC', 'soft', true, 20);
+    touchButton(xs[1], y0 + 152, bw, 44, '\u2714 обмін', 'drop', true, 14);
+    touchButton(xs[2], y0 + 152, bw, 44, '\u2716 скасувати', 'hold', true, 13);
+  } else {
+    touchButton(xs[0], y0 + 88, bw, 56, '\u25C0', 'left', true, 24);
+    touchButton(xs[1], y0 + 88, bw, 56, '\u21BB', 'rot', true, 28);
+    touchButton(xs[2], y0 + 88, bw, 56, '\u25B6', 'right', true, 24);
+    touchButton(xs[0], y0 + 152, bw, 44, '\u25BC швидко', 'soft', true, 14);
+    touchButton(xs[1], y0 + 152, bw, 44, '\u25BC\u25BC скинути', 'drop', true, 14);
+    touchButton(xs[2], y0 + 152, bw, 44, 'ЗАПАС', 'hold', canHold, 14);
+  }
 }
 function drawHudShop() {
   g.fillStyle = '#0d1320'; g.fillRect(0, 0, CW, HUD_H);
