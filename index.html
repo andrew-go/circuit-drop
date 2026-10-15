@@ -33,12 +33,12 @@ const LOCK_DELAY = 450;                  // ms before a resting tile locks
 const SETTLE_SPEED = 0.014;              // rows/ms for tiles falling after a clear
 
 // ---- Run structure (tune these first when balancing) ----------------
-const GOALS = [250, 340, 450, 580, 700, 830, 960, 1090, 1150];   // score per stage; the last is the boss
+const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 2000];   // score per stage; the last is the boss
 const STAGES = GOALS.length;
 const START_FUSES = 3;
 // Balance knobs in one place. mercy[stage-1] = how many candidate tiles are drawn, keeping the best fit (1 = pure random).
-const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, insBase: 0.03, insStep: 0.012,
-              mercy: [4, 3, 2, 3, 2, 2, 2, 2, 3] };   // bosses (3, 6, 9) get less help than the stages around them
+const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, insBase: 0.03, insStep: 0.018,
+              mercy: [1, 1, 2, 1, 1, 1, 1, 1, 1] };   // tile-fitting help: only boss stages get any (1 = pure random)
 const STAGE_BONUS = 8, STAGE_BONUS_PER = 2;   // sparks for clearing a stage: 8 + 2 * stage
 const SPARKS_PER_CIRCUIT = 2;                 // plus 1 per extra chain step
 const ALL_CLEAR_MIN = 10, ALL_CLEAR_BASE = 100, ALL_CLEAR_PER = 40;   // emptying the board after clearing 10+ tiles
@@ -62,7 +62,7 @@ const MODS = {
 const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
 // tips: shown on the briefing screen. {C} becomes " (C)" on a keyboard and disappears on touch.
 const BOSSES = {
-  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'], riseEvery: 8,
+  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'], riseEvery: 8, insulator: 0.054,
        tips: ['Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Ряд підіймається знизу й виштовхує стопку вгору.',
               'Будуйте коло внизу: ізолятори, що торкаються кола, згорають разом із ним.',
               'Не давайте стопці дійти до верху: переповнення коштує запобіжника. Силу УДАР можна використати, щоб прибрати зайву плитку.'] },
@@ -70,14 +70,14 @@ const BOSSES = {
        tips: ['Наступні плитки приховані: тримайте запас{C} і прибирайте хрестовини та трійники. Вони підходять майже скрізь.',
               'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.',
               'Незручна плитка? Сила ХРЕСТ робить її чотиристоронньою. Магніт скорочує коло на колонку з кожного боку.'] },
-  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], riseEvery: 13, diagram: true,
-       tips: ['Усе разом: підйом ізоляторів, прихований перегляд і мертві ряди. Тримайте стопку низько.',
-              'Бонус: ланцюжок ×2 (схема вище) подвоює очки другого кола. Два кола за один хід: перше зникає, плитки падають і замикають друге.',
+  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2,
+       tips: ['Потрібен ланцюжок ×2: два кола за один хід (див. схему). Ще й прихований перегляд та мертві ряди.',
+              'Робіть ланцюжок одразу, поки поле низьке, і стежте за лічильником \u{1F9F1}.',
               'Прийдіть із запобіжниками, зарядом на силу й Магнітом чи Страхувальною сіткою.'] },
 };
 
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
-const pInsulator   = () => Math.min(0.3, (BAL.insBase + BAL.insStep * (level - 1)) * (pk('clean') ? 0.5 : 1));
+const pInsulator   = () => Math.min(0.3, ((BOSSES[level] && BOSSES[level].insulator) ?? (BAL.insBase + BAL.insStep * (level - 1))) * (pk('clean') ? 0.5 : 1));
 const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
 const pBomb        = () => 0.03 * (pk('demo') ? 2.5 : 1);
 const maxCharges   = () => BASE_CHARGES + pk('bank');
@@ -1383,7 +1383,7 @@ function drawBossTips(b, y) {
   const layout = () => { g.font = font(); wrapped = tips.map(t => wrap(t, w - 36)); };
   layout();
   const need = withD => 30 + (withD ? DH : 0) + wrapped.reduce((n, l) => n + l.length * lh + 3, 0);
-  let showD = !!b.diagram;
+  let showD = !!b.needChain;
   if (need(showD) > bottom - y) { fs = 10.5; lh = 13; layout(); }
   if (showD && need(true) > bottom - y) showD = false;          // no room for the picture on very crowded stages
   rr(x0, y, w, bottom - y, 8); g.fillStyle = 'rgba(125,255,176,0.06)'; g.fill();
