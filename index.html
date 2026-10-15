@@ -33,11 +33,11 @@ const LOCK_DELAY = 450;                  // ms before a resting tile locks
 const SETTLE_SPEED = 0.014;              // rows/ms for tiles falling after a clear
 
 // ---- Run structure (tune these first when balancing) ----------------
-const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 2000];   // score per stage; the last is the boss
+const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 1500];   // score per stage; the last is the boss
 const STAGES = GOALS.length;
 const START_FUSES = 3;
 // Balance knobs in one place. mercy[stage-1] = how many candidate tiles are drawn, keeping the best fit (1 = pure random).
-const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, insBase: 0.03, insStep: 0.018,
+const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, machineSteps: [3, 5], machineCool: [2, 3], insBase: 0.03, insStep: 0.018,
               mercy: [1, 1, 2, 1, 1, 1, 1, 1, 1] };   // tile-fitting help: only boss stages get any (1 = pure random)
 const STAGE_BONUS = 8, STAGE_BONUS_PER = 2;   // sparks for clearing a stage: 8 + 2 * stage
 const SPARKS_PER_CIRCUIT = 2;                 // plus 1 per extra chain step
@@ -57,6 +57,7 @@ const MODS = {
   rising:   { icon: '\u{1F9F1}',         name: 'Підйом ізоляторів', desc: 'Через кожні кілька плиток знизу випирає ряд ізоляторів. Стежте за лічильником й не дайте стопці дійти до верху.' },
   blind:    { icon: '\u{1F576}\uFE0F',  name: 'Затемнення',        desc: 'Наступні плитки приховані. Спирайтеся на запас.' },
   deadrows: { icon: '\u26D4',            name: 'Мертві ряди',       desc: '3 ряди не підключаються до стін (вони затемнені). Шукайте обхід.' },
+  machine:  { icon: '\u{1F916}',        name: 'Лазерна машина',    desc: 'Машина їздить над полем. Зупинившись, за 1–2 ходи вона стріляє й знищує верхню плитку колонки без очок (ціль позначена хрестиком). Потім 2–3 ходи перезаряджається.' },
   drift:    { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             desc: 'Падаюча плитка час від часу зсувається вбік.' },
 };
 const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
@@ -70,10 +71,10 @@ const BOSSES = {
        tips: ['Наступні плитки приховані: тримайте запас{C} і прибирайте хрестовини та трійники. Вони підходять майже скрізь.',
               'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.',
               'Незручна плитка? Сила ХРЕСТ робить її чотиристоронньою. Магніт скорочує коло на колонку з кожного боку.'] },
-  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2,
-       tips: ['Потрібен ланцюжок ×2: два кола за один хід (див. схему). Ще й прихований перегляд та мертві ряди.',
-              'Робіть ланцюжок одразу, поки поле низьке, і стежте за лічильником \u{1F9F1}.',
-              'Прийдіть із запобіжниками, зарядом на силу й Магнітом чи Страхувальною сіткою.'] },
+  9: { name: 'ЛАЗЕРНА МАШИНА',    mods: ['machine'], diagram: 'machine',
+       tips: ['Машина їздить над полем. Коли вона зупиняється (на лічильнику \u{1F916} з’являється «!»), за 1–2 ходи вона стріляє й знищує верхню плитку колонки без очок. Після пострілу вона 2–3 ходи перезаряджається.',
+              'Червона лінія показує, куди влучить промінь. Ціль позначена хрестиком, а число на ній показує ходи до пострілу. Покладіть у цю колонку зайву плитку чи ізолятор, щоб промінь забрав саме її.',
+              'Не залишайте важливу плитку зверху під машиною. Тримайте коло в інших колонках.'] },
 };
 
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
@@ -194,7 +195,7 @@ try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
 
 function freshRun() {
   return { stage: 1, fuses: BAL.fuses, maxFuses: BAL.fuses, sparks: 0, perks: {}, netUsed: false, repairs: 0,
-           heat, plan: {}, mods: [], deadRows: [], sinceRise: 0 };
+           heat, plan: {}, mods: [], deadRows: [], sinceRise: 0, machine: null };
 }
 function pk(id) { return (run && run.perks[id]) || 0; }
 const goalFor = s => Math.round(GOALS[s - 1] * (1 + HEAT_GOAL * run.heat) / 10) * 10;
@@ -267,6 +268,7 @@ function startStage() {
   stageScore = 0; stageMaxChain = 0; chainWarned = false; driftAcc = 0;
   run.netUsed = false; level = run.stage; run.sinceRise = 0;
   run.mods = modsFor(run.stage);
+  run.machine = hasMod('machine') ? newMachine() : null;
   run.deadRows = [];
   if (hasMod('deadrows')) {
     const rows = [];
@@ -281,11 +283,48 @@ function startStage() {
   spawn();
 }
 function beginStage() { spawn(); }
+
+// ---- Laser machine (boss modifier) ----------------------------------
+// It rides along above the board, one column per turn (a turn = a tile spawning). After a few moves it stops;
+// 1-2 turns later it fires and destroys the top tile of its column. No score for anything it destroys.
+const rollRange = ([lo, hi]) => lo + ((Math.random() * (hi - lo + 1)) | 0);
+const machineNeed = () => rollRange(BAL.machineSteps);
+function newMachine() {
+  const col = (Math.random() * COLS) | 0;
+  return { col, x: col, dir: Math.random() < 0.5 ? -1 : 1, mode: 'move', steps: 0, need: machineNeed(), aim: 0, cool: 0, beam: 0, beamY: 0, armed: false };
+}
+const machineLabel = () => { const m = run.machine; return m.mode === 'aim' ? '!' + m.aim : m.mode === 'cool' ? '⏳' + m.cool : String(Math.max(0, m.need - m.steps)); };
+function machineTurn() {
+  const m = run.machine;
+  if (m.mode === 'move') {
+    let nc = m.col + m.dir;
+    if (nc < 0 || nc >= COLS) { m.dir = -m.dir; nc = m.col + m.dir; }
+    m.col = nc; m.steps++;
+    if (m.steps >= m.need) { m.mode = 'aim'; m.aim = 1 + ((Math.random() * 2) | 0); beep(260, 0.12, 'square', 0.04); }
+  } else if (m.mode === 'aim') {
+    if (--m.aim <= 0) { machineFire(); m.mode = 'cool'; m.cool = rollRange(BAL.machineCool); }
+  } else if (--m.cool <= 0) {                   // recharged: ride again
+    m.mode = 'move'; m.steps = 0; m.need = machineNeed();
+    if (Math.random() < 0.5) m.dir = -m.dir;
+  }
+}
+function machineFire() {
+  const m = run.machine, r = topInCol(m.col);
+  m.beam = 260; m.beamY = (r >= 0 ? r + 1 : ROWS) * T;
+  if (r >= 0) {
+    grid[r][m.col] = null;                      // destroyed without score
+    burst(WALL + (m.col + 0.5) * T, (r + 0.5) * T, '#ff6a5a', 14);
+    popText('ПРОМІНЬ', WALL + (m.col + 0.5) * T, r * T + 10, '#ff6a5a', 16);
+    updateFlags(flood(true));
+  }
+  beep(520, 0.25, 'sawtooth', 0.05, -380);
+}
 // Bosses can set their own rising speed (riseEvery); everything else uses BAL.riseEvery.
 function riseEvery() { return (BOSSES[run.stage] && BOSSES[run.stage].riseEvery) || BAL.riseEvery; }
 function spawn() {
   canHold = true;
   if (hasMod('rising') && run.sinceRise >= riseEvery()) { run.sinceRise = 0; risePush(); return; }
+  if (run.machine) { if (run.machine.armed) machineTurn(); run.machine.armed = true; }   // the machine moves once per tile
   run.sinceRise++;
   startPiece(queue.shift());
   queue.push(makeNext());
@@ -784,6 +823,7 @@ function updatePlay(dt) {
 
 function update(dt) {
   const moving = animTiles(dt);
+  if (run.machine) { run.machine.x += (run.machine.col - run.machine.x) * Math.min(1, dt * 0.012); if (run.machine.beam > 0) run.machine.beam -= dt; }
   if (state === 'play') updatePlay(dt);
   else if (state === 'clearing') updateClearing(dt);
   else if (state === 'settling' && !moving) resolve();
@@ -1040,6 +1080,43 @@ function drawWall(x0, left) {
   }
 }
 
+function machineSprite(cx, y, aimNum, st) {
+  const aiming = st === 'aim', cooling = st === 'cool';
+  g.save(); g.translate(cx, y);
+  rr(-17, 0, 34, 16, 5); g.fillStyle = '#3b4558'; g.fill();
+  g.lineWidth = 1.5; g.strokeStyle = aiming ? '#ff5a4a' : cooling ? '#3a4558' : '#6f7d96'; g.stroke();
+  g.fillStyle = aiming ? '#ff5a4a' : cooling ? '#56637a' : '#7fd6ff'; g.beginPath(); g.arc(0, 8, 4, 0, 7); g.fill();     // lens
+  g.fillStyle = '#6f7d96'; g.fillRect(-14, 16, 5, 3); g.fillRect(9, 16, 5, 3);                    // feet
+  if (aiming) { g.fillStyle = '#fff'; g.font = '700 10px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(aimNum), 0, 8.5); }
+  g.restore();
+}
+function drawMachine(now) {
+  const m = run.machine, aim = m.mode === 'aim', tr = topInCol(m.col);
+  const bx = WALL + (m.col + 0.5) * T;
+  if (aim || m.beam > 0) {
+    g.save();
+    if (m.beam > 0) {                           // the shot
+      g.globalAlpha = Math.min(1, m.beam / 200); g.strokeStyle = '#ffe5e0'; g.lineWidth = 8;
+      g.shadowColor = '#ff3b30'; g.shadowBlur = 18;
+      g.beginPath(); g.moveTo(bx, 18); g.lineTo(bx, m.beamY); g.stroke();
+    } else {                                    // warning: dashed line to the tile that will be hit
+      const ty = (tr >= 0 ? tr : ROWS) * T;
+      g.globalAlpha = 0.35 + 0.25 * Math.sin(now / 90); g.strokeStyle = '#ff5a4a'; g.lineWidth = 2;
+      g.setLineDash([6, 6]); g.beginPath(); g.moveTo(bx, 18); g.lineTo(bx, ty); g.stroke(); g.setLineDash([]);
+      if (tr >= 0) {                            // the doomed tile: red tint, X and the turns left
+        const tx = WALL + m.col * T, tyy = tr * T;
+        g.globalAlpha = 0.28; g.fillStyle = '#ff3b30'; rr(tx + 2, tyy + 2, T - 4, T - 4, 6); g.fill();
+        g.globalAlpha = 0.95; g.lineWidth = 2.5; rr(tx + 2, tyy + 2, T - 4, T - 4, 6); g.stroke();
+        g.lineWidth = 3; g.beginPath(); g.moveTo(tx + 14, tyy + 14); g.lineTo(tx + T - 14, tyy + T - 14); g.moveTo(tx + T - 14, tyy + 14); g.lineTo(tx + 14, tyy + T - 14); g.stroke();
+        g.globalAlpha = 1; g.fillStyle = '#ff3b30'; g.beginPath(); g.arc(tx + T - 9, tyy + 9, 8, 0, 7); g.fill();
+        g.fillStyle = '#fff'; g.font = '700 11px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(m.aim), tx + T - 9, tyy + 9.5);
+      }
+    }
+    g.restore();
+  }
+  machineSprite(WALL + (m.x + 0.5) * T, 3, m.aim, m.mode);
+}
+
 function drawBoard(now) {
   g.fillStyle = '#0f1623'; g.fillRect(WALL, 0, BW, BH);
   g.strokeStyle = 'rgba(255,255,255,0.045)'; g.lineWidth = 1; g.beginPath();
@@ -1071,6 +1148,7 @@ function drawBoard(now) {
     drawTile(WALL + curX * T, cur.y * T, cur.tile, T);
   }
 
+  if (run.machine) drawMachine(now);
   for (const p of particles) {
     g.globalAlpha = Math.max(0, p.life / p.max); g.fillStyle = p.color;
     g.fillRect(p.x - 2, p.y - 2, 4, 4);
@@ -1136,6 +1214,7 @@ function drawPanel(now) {
   for (const id of run.mods) {
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 194); mx += 20;
     if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 194); mx += 16; }
+    if (id === 'machine') { g.font = '700 11px system-ui'; g.fillStyle = run.machine && run.machine.mode === 'aim' ? '#ff5a4a' : '#ffb347'; g.fillText(run.machine ? machineLabel() : '', mx, 194); mx += 20; }
   }
   if (chainNeed()) {
     const ok = stageMaxChain >= chainNeed();
@@ -1329,8 +1408,9 @@ function drawBriefing() {
     g.textBaseline = 'alphabetic'; g.font = `700 ${compact ? 14 : 15}px system-ui`; g.fillStyle = '#ffb347';
     g.fillText(m.name, WALL + 62, y + (compact ? 9 : 10));
     g.font = `${compact ? 11 : 12}px system-ui`; g.fillStyle = '#9fb0cc';
-    wrap(m.desc, BW - 90).forEach((ln, i) => g.fillText(ln, WALL + 62, y + (compact ? 24 : 30) + i * (compact ? 13 : 16)));
-    y += compact ? 54 : 66;
+    const lines = wrap(m.desc, BW - 90);
+    lines.forEach((ln, i) => g.fillText(ln, WALL + 62, y + (compact ? 24 : 30) + i * (compact ? 13 : 16)));
+    y += Math.max(compact ? 54 : 66, (compact ? 30 : 36) + lines.length * (compact ? 13 : 16));   // grow with long descriptions
   }
   if (b && b.tips) drawBossTips(b, y + 4);
   g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#7dffb0'; g.font = '700 15px system-ui';
@@ -1374,6 +1454,35 @@ function drawChainDiagram(x, y, w) {
   }
 }
 
+// Mini picture of the laser machine: 1 = it rides along, 2 = it stops and aims (counter shows the turns left), 3 = the shot.
+function drawMachineDiagram(x, y, w) {
+  const s = 14, gap = 14, cols = 5, fw = cols * s, x0 = x + (w - (3 * fw + 2 * gap)) / 2, top = y + 9;
+  const tile = (mask, hot) => ({ kind: 'normal', mask, hp: 1, dy: 0, lit: false, cl: !!hot, cr: false });
+  const captions = ['1. Їде', '2. Ціль, 2 ходи', '3. Постріл!'];
+  for (let n = 1; n <= 3; n++) {
+    const fx = x0 + (n - 1) * (fw + gap), mcol = n === 1 ? 1 : 3;
+    rr(fx - 1, top - 1, fw + 2, 3 * s + 2, 3); g.fillStyle = '#0f1623'; g.fill();
+    for (let c = 0; c < cols; c++) drawTile(fx + c * s, top + 2 * s, tile(10), s);          // floor row
+    drawTile(fx + 1 * s, top + s, tile(5), s); drawTile(fx + 3 * s, top + s, tile(5), s);   // two small stacks
+    if (n === 3) {                                  // the top tile of column 3 is gone
+      g.fillStyle = '#0f1623'; g.fillRect(fx + 3 * s, top + s, s, s);
+      g.fillStyle = '#ff6a5a'; for (let i = 0; i < 4; i++) g.fillRect(fx + 3 * s + 2 + (i * 3) % 10, top + s + 3 + (i * 5) % 9, 2, 2);
+    }
+    const bx = fx + (mcol + 0.5) * s;
+    if (n === 2) {
+      g.save(); g.strokeStyle = '#ff5a4a'; g.lineWidth = 1; g.setLineDash([2, 2]);
+      g.beginPath(); g.moveTo(bx, top - 1); g.lineTo(bx, top + s); g.stroke(); g.restore();
+      g.strokeStyle = '#ff5a4a'; g.lineWidth = 1.5; g.strokeRect(fx + 3 * s + 1, top + s + 1, s - 2, s - 2);
+    }
+    if (n === 3) { g.save(); g.strokeStyle = '#ffe5e0'; g.lineWidth = 3; g.shadowColor = '#ff3b30'; g.shadowBlur = 6; g.beginPath(); g.moveTo(bx, top - 1); g.lineTo(bx, top + 2 * s); g.stroke(); g.restore(); }
+    const mx = fx + (mcol + 0.5) * s;              // the machine, shrunk
+    g.save(); g.translate(mx, y - 1); g.scale(0.4, 0.4); machineSprite(0, 0, n === 2 ? 2 : 0, n === 2 ? 'aim' : n === 3 ? 'cool' : 'move'); g.restore();
+    if (n === 1) { g.fillStyle = '#56637a'; g.font = '700 8px system-ui'; g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.fillText('\u25B6', mx + 11, y + 4); }
+    g.fillStyle = n === 3 ? '#ff9b8f' : '#9fb0cc'; g.font = '700 9.5px system-ui'; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    g.fillText(captions[n - 1], fx + fw / 2, top + 3 * s + 13);
+  }
+}
+
 // "How to beat it" panel on a boss briefing, from y down to just above the start hint.
 function drawBossTips(b, y) {
   const x0 = WALL + 14, w = BW - 28, bottom = BH - 46, DH = 72;
@@ -1383,7 +1492,7 @@ function drawBossTips(b, y) {
   const layout = () => { g.font = font(); wrapped = tips.map(t => wrap(t, w - 36)); };
   layout();
   const need = withD => 30 + (withD ? DH : 0) + wrapped.reduce((n, l) => n + l.length * lh + 3, 0);
-  let showD = !!b.needChain;
+  let showD = !!b.diagram;
   if (need(showD) > bottom - y) { fs = 10.5; lh = 13; layout(); }
   if (showD && need(true) > bottom - y) showD = false;          // no room for the picture on very crowded stages
   rr(x0, y, w, bottom - y, 8); g.fillStyle = 'rgba(125,255,176,0.06)'; g.fill();
@@ -1391,7 +1500,7 @@ function drawBossTips(b, y) {
   g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillStyle = '#7dffb0'; g.font = '700 11px system-ui';
   g.fillText('ЯК ПЕРЕМОГТИ', x0 + 12, y + 18);
   let ty = y + 30;
-  if (showD) { drawChainDiagram(x0, ty + 4, w); ty += DH; }
+  if (showD) { (b.diagram === 'machine' ? drawMachineDiagram : drawChainDiagram)(x0, ty + 4, w); ty += DH; }
   ty += 8;
   wrapped.forEach(lines => {
     g.textAlign = 'left'; g.textBaseline = 'alphabetic';
@@ -1422,6 +1531,7 @@ function drawHud(now) {
   for (const id of run.mods) {
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 22); mx += 20;
     if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 22); mx += 16; }
+    if (id === 'machine') { g.font = '700 11px system-ui'; g.fillStyle = run.machine && run.machine.mode === 'aim' ? '#ff5a4a' : '#ffb347'; g.fillText(run.machine ? machineLabel() : '', mx, 22); mx += 20; }
   }
   if (PLAY_STATES.includes(state)) {
     touchButton(CW - 46, 6, 34, 28, '\u{1F392}', 'perks', true, 14);
