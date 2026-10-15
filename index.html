@@ -37,8 +37,8 @@ const GOALS = [250, 350, 450, 600, 750, 950, 1200, 1500, 1500];   // score per s
 const STAGES = GOALS.length;
 const START_FUSES = 3;
 // Balance knobs in one place. mercy[stage-1] = how many candidate tiles are drawn, keeping the best fit (1 = pure random).
-const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, machineSteps: [3, 5], machineCool: [2, 3], insBase: 0.03, insStep: 0.018,
-              mercy: [1, 1, 2, 1, 1, 1, 1, 1, 1] };   // tile-fitting help: only boss stages get any (1 = pure random)
+const BAL = { fuses: START_FUSES, riseEvery: 10, riseGaps: 2, insBase: 0.03, insStep: 0.018,
+              mercy: [1, 1, 2, 1, 1, 2, 1, 1, 1] };   // tile-fitting help: only the easy and medium boss stages get any (1 = pure random)
 const STAGE_BONUS = 8, STAGE_BONUS_PER = 2;   // sparks for clearing a stage: 8 + 2 * stage
 const SPARKS_PER_CIRCUIT = 2;                 // plus 1 per extra chain step
 const ALL_CLEAR_MIN = 10, ALL_CLEAR_BASE = 100, ALL_CLEAR_PER = 40;   // emptying the board after clearing 10+ tiles
@@ -50,35 +50,98 @@ const TIER_NAME = { 1: 'ЗВИЧАЙНИЙ', 2: 'НЕЗВИЧАЙНИЙ', 3: 'Р
 const TIER_COLOR = { 1: '#8b99b3', 2: '#6db4ff', 3: '#ffb347' };
 
 // ---- Bosses, modifiers and heat -------------------------------------
-const DEAD_ROWS = 3, DEAD_ROW_FROM = 4;       // dead rows are picked among rows DEAD_ROW_FROM..ROWS-1
-const DRIFT_MS = 2400;                        // how often a falling tile may get nudged sideways
+const DEAD_ROW_FROM = 4;                      // dead rows are picked among rows DEAD_ROW_FROM..ROWS-1
 const HEAT_MAX = 3, HEAT_GOAL = 0.15, HEAT_SPARKS = 0.15, HEAT_FROM_STAGE = 5;
+
+// Boss skills. short = one line for the briefing list; tip = "how to beat it" line ({C} = " (C)" on a keyboard only).
 const MODS = {
-  rising:   { icon: '\u{1F9F1}',         name: 'Підйом ізоляторів', desc: 'Через кожні кілька плиток знизу випирає ряд ізоляторів. Стежте за лічильником й не дайте стопці дійти до верху.' },
-  blind:    { icon: '\u{1F576}\uFE0F',  name: 'Затемнення',        desc: 'Наступні плитки приховані. Спирайтеся на запас.' },
-  deadrows: { icon: '\u26D4',            name: 'Мертві ряди',       desc: '3 ряди не підключаються до стін (вони затемнені). Шукайте обхід.' },
-  machine:  { icon: '\u{1F916}',        name: 'Лазерна машина',    desc: 'Машина їздить над полем. Зупинившись, за 1–2 ходи вона стріляє й знищує верхню плитку колонки без очок (ціль позначена хрестиком). Потім 2–3 ходи перезаряджається.' },
-  drift:    { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             desc: 'Падаюча плитка час від часу зсувається вбік.' },
+  rising:    { icon: '\u{1F9F1}',        name: 'Підйом ізоляторів', short: 'Знизу випирає ряд ізоляторів.',
+               tip: 'Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Будуйте внизу: кола випалюють ізолятори, що їх торкаються.' },
+  fog:       { icon: '\u{1F32B}\uFE0F',  name: 'Туман',             short: 'Плитка видима лише нижче верхніх рядів.',
+               tip: 'Туман ховає плитку, поки вона не опуститься, а підказку приземлення й попередній перегляд вимикає. Повертайте плитку вже на видноті, на запас{C} спирайтеся там, де можна.' },
+  deadrows:  { icon: '\u26D4',           name: 'Мертві ряди',       short: 'Кілька рядів не підключаються до стін.',
+               tip: 'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.' },
+  scanner:   { icon: '\u{1F4E1}',        name: 'Сканер',            short: 'Мертві ряди повзуть вниз.',
+               tip: 'Затемнені ряди повзуть вниз кожні кілька ходів (лічильник вгорі). Перевіряйте, які ряди зараз «живі».' },
+  machine:   { icon: '\u{1F916}',        name: 'Лазерна машина',    short: 'Стріляє по верхній плитці колонки.',
+               tip: 'Машина стає на місце, і за 1–2 ходи стріляє. Ціль позначена хрестиком із числом ходів: покладіть туди зайву плитку чи ізолятор, щоб промінь забрав саме її. Потім вона перезаряджається.' },
+  drift:     { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             short: 'Плитка зсувається вбік під час падіння.',
+               tip: 'Плитка іноді зсувається вбік: перевіряйте колонку перед скиданням.' },
+  rain:      { icon: '\u{1F327}\uFE0F',  name: 'Шлаковий дощ',      short: 'Ізоляторів значно більше.',
+               tip: 'Ізоляторів багато: тримайте поле низьким і будуйте кола поряд із ними, щоб випалювати.' },
+  frost:     { icon: '\u2744\uFE0F',     name: 'Мороз',             short: 'Колонка час від часу замерзає.',
+               tip: 'Замерзла колонка (\u2744 і число ходів) заблокована: у неї не можна класти плитки. Плануйте коло в інших колонках.' },
+  corrosion: { icon: '\u{1F9EA}',        name: 'Іржа',              short: 'Плитки іржавіють і стають ізоляторами.',
+               tip: 'Іржаву плитку (помаранчева з «!») через хід буде замінено ізолятором: використайте її в колі раніше або перекрийте.' },
+  static:    { icon: '\u{1F300}',        name: 'Статика',           short: 'Плитка сама повертається під час падіння.',
+               tip: 'Плитка сама повертається кожні кілька секунд: фіксуйте її одразу, щойно вона стала потрібною.' },
+  timer:     { icon: '\u23F3',           name: 'Короткий запобіжник', short: 'Ходи обмежені.',
+               tip: 'Ходи обмежені (лічильник \u23F3). Коли вони закінчуються, ви втрачаєте запобіжник і отримуєте кілька додаткових ходів.' },
 };
-const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
-// tips: shown on the briefing screen. {C} becomes " (C)" on a keyboard and disappears on touch.
-const BOSSES = {
-  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'], riseEvery: 8, insulator: 0.054,
-       tips: ['Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Ряд підіймається знизу й виштовхує стопку вгору.',
-              'Будуйте коло внизу: ізолятори, що торкаються кола, згорають разом із ним.',
-              'Не давайте стопці дійти до верху: переповнення коштує запобіжника. Силу УДАР можна використати, щоб прибрати зайву плитку.'] },
-  6: { name: 'ЗАТЕМНЕННЯ',        mods: ['blind', 'deadrows'],
-       tips: ['Наступні плитки приховані: тримайте запас{C} і прибирайте хрестовини та трійники. Вони підходять майже скрізь.',
-              'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.',
-              'Незручна плитка? Сила ХРЕСТ робить її чотиристоронньою. Магніт скорочує коло на колонку з кожного боку.'] },
-  9: { name: 'ЛАЗЕРНА МАШИНА',    mods: ['machine'], diagram: 'machine',
-       tips: ['Машина їздить над полем. Коли вона зупиняється (на лічильнику \u{1F916} з’являється «!»), за 1–2 ходи вона стріляє й знищує верхню плитку колонки без очок. Після пострілу вона 2–3 ходи перезаряджається.',
-              'Червона лінія показує, куди влучить промінь. Ціль позначена хрестиком, а число на ній показує ходи до пострілу. Покладіть у цю колонку зайву плитку чи ізолятор, щоб промінь забрав саме її.',
-              'Не залишайте важливу плитку зверху під машиною. Тримайте коло в інших колонках.'] },
+const HEAT_POOL = ['rising', 'fog', 'deadrows', 'drift'];   // extra skills Heat can add from stage 5
+
+// Skill strength by boss tier. A boss can override anything in its own `cfg`.
+const SKILL_CFG = {
+  rising:    { easy: { riseEvery: 11, riseGaps: 2 }, medium: { riseEvery: 12, riseGaps: 3 }, hard: { riseEvery: 14, riseGaps: 4 } },
+  drift:     { easy: { driftMs: 3400 }, medium: { driftMs: 2600 }, hard: { driftMs: 1900 } },
+  machine:   { easy:   { mSteps: [4, 6], mAim: [2, 2], mCool: [3, 4], machines: 1 },
+               medium: { mSteps: [3, 5], mAim: [1, 2], mCool: [2, 3], machines: 1 },
+               hard:   { mSteps: [2, 4], mAim: [1, 1], mCool: [2, 3], machines: 1 } },
+  fog:       { easy: { fogRows: 2 }, medium: { fogRows: 4 }, hard: { fogRows: 6 } },
+  rain:      { easy: { rainMul: 2 }, medium: { rainMul: 2.4 }, hard: { rainMul: 3 } },
+  deadrows:  { easy: { deadRows: 2 }, medium: { deadRows: 2 }, hard: { deadRows: 3 } },
+  scanner:   { easy: { deadRows: 2, scanEvery: 6 }, medium: { deadRows: 2, scanEvery: 6 }, hard: { deadRows: 3, scanEvery: 4 } },
+  frost:     { easy: { frostEvery: 7, frostTurns: [2, 2] }, medium: { frostEvery: 6, frostTurns: [2, 3] }, hard: { frostEvery: 5, frostTurns: [2, 3] } },
+  corrosion: { easy: { corrodeEvery: 12 }, medium: { corrodeEvery: 9 }, hard: { corrodeEvery: 10 } },
+  static:    { easy: { staticMs: 3800 }, medium: { staticMs: 3000 }, hard: { staticMs: 2300 } },
+  timer:     { easy: { turnLimit: 100, turnExtra: 10 }, medium: { turnLimit: 130, turnExtra: 10 }, hard: { turnLimit: 150, turnExtra: 12 } },
 };
 
+// Each run rolls one boss per tier: stage 3 = easy, 6 = medium, 9 = hard. Medium and hard bosses also get a random extra skill.
+const BOSS_TIER = { 3: 'easy', 6: 'medium', 9: 'hard' };
+const BOSS_POOL = {
+  easy: [
+    { id: 'overvoltage', name: 'ПЕРЕНАПРУГА',    mods: ['rising'] },
+    { id: 'drone',       name: 'ДРОН-НОВАЧОК',   mods: ['machine'] },
+    { id: 'gust',        name: 'ПОРИВ',          mods: ['drift'] },
+    { id: 'fog',         name: 'ТУМАН',          mods: ['fog'] },
+    { id: 'slag',        name: 'ШЛАК',           mods: ['rain'] },
+  ],
+  medium: [
+    { id: 'blackout',    name: 'ЗАТЕМНЕННЯ',     mods: ['fog', 'deadrows'] },
+    { id: 'laser',       name: 'ЛАЗЕРНА МАШИНА', mods: ['machine'] },
+    { id: 'frost',       name: 'МОРОЗ',          mods: ['frost'] },
+    { id: 'rust',        name: 'ІРЖА',           mods: ['corrosion'] },
+    { id: 'scanner',     name: 'СКАНЕР',         mods: ['scanner'] },
+  ],
+  hard: [
+    { id: 'twin',        name: 'ДВІЙНІ ЛАЗЕРИ',  mods: ['machine'], cfg: { machines: 2, mSteps: [3, 5], mAim: [1, 2], mCool: [2, 3] } },
+    { id: 'rapid',       name: 'ШВИДКОСТРІЛ',    mods: ['machine'] },
+    { id: 'timebomb',    name: 'БОМБА З ТАЙМЕРОМ', mods: ['timer', 'machine'], cfg: { mSteps: [3, 5], mAim: [1, 2], mCool: [2, 3] } },
+    { id: 'meltdown',    name: 'ПЕРЕГРІВ',       mods: ['corrosion', 'drift'], cfg: { corrodeEvery: 12 } },
+    { id: 'chaos',       name: 'ХАОС',           mods: ['static', 'drift', 'fog'] },
+  ],
+};
+const EXTRA_SLOTS = { easy: 0, medium: 1, hard: 1 };
+const EXTRA_POOL = {
+  medium: ['rising', 'drift', 'rain', 'fog', 'deadrows', 'frost', 'corrosion'],
+  hard:   ['rising', 'drift', 'rain', 'fog', 'deadrows', 'frost', 'corrosion', 'static', 'scanner', 'machine'],
+};
+function rollBoss(tier, forceId, forceExtras) {
+  const pool = BOSS_POOL[tier];
+  const def = forceId ? pool.find(b => b.id === forceId) : pool[(Math.random() * pool.length) | 0];
+  const mods = def.mods.slice();
+  if (forceExtras) mods.push(...forceExtras.filter(m => !mods.includes(m)));
+  else for (let n = EXTRA_SLOTS[tier]; n > 0 && mods.length < 3; n--) {
+    const cand = (EXTRA_POOL[tier] || []).filter(m => !mods.includes(m));
+    if (cand.length) mods.push(cand[(Math.random() * cand.length) | 0]);
+  }
+  return { id: def.id, tier, name: def.name, mods, core: def.mods.length, cfg: def.cfg || {} };
+}
+function rollBosses() { const o = {}; for (const st in BOSS_TIER) o[st] = rollBoss(BOSS_TIER[st]); return o; }
+
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
-const pInsulator   = () => Math.min(0.3, ((BOSSES[level] && BOSSES[level].insulator) ?? (BAL.insBase + BAL.insStep * (level - 1))) * (pk('clean') ? 0.5 : 1));
+const pInsulator   = () => Math.min(0.3, (BAL.insBase + BAL.insStep * (level - 1)) * (hasMod('rain') ? run.cfg.rainMul : 1) * (pk('clean') ? 0.5 : 1));
 const pResistor    = () => 0.06 * (pk('ohm') ? 3 : 1);
 const pBomb        = () => 0.03 * (pk('demo') ? 2.5 : 1);
 const maxCharges   = () => BASE_CHARGES + pk('bank');
@@ -190,24 +253,43 @@ let charge = 0, charges = 0, lastLock = null;   // charge meter (0-100), banked 
 let heat = 0;                   // chosen on the title / result screens (0..HEAT_MAX)
 try { heat = Math.max(0, Math.min(HEAT_MAX, +localStorage.getItem('circuitDropHeat') || 0)); } catch (e) {}
 let run = freshRun(), stageScore = 0, shop = null, summary = null, winT = 0, shopHits = [], menuHits = [];
-let stageMaxChain = 0, chainWarned = false, driftAcc = 0;
+let stageMaxChain = 0, chainWarned = false, driftAcc = 0, staticAcc = 0;
 try { best = +localStorage.getItem('circuitDropBest') || 0; } catch (e) {}
 
 function freshRun() {
   return { stage: 1, fuses: BAL.fuses, maxFuses: BAL.fuses, sparks: 0, perks: {}, netUsed: false, repairs: 0,
-           heat, plan: {}, mods: [], deadRows: [], sinceRise: 0, machine: null };
+           heat, plan: {}, mods: [], deadRows: [], sinceRise: 0, machines: [], cfg: {}, frost: { col: -1, turns: 0 }, turnNo: 0,
+           bosses: rollBosses() };
 }
 function pk(id) { return (run && run.perks[id]) || 0; }
 const goalFor = s => Math.round(GOALS[s - 1] * (1 + HEAT_GOAL * run.heat) / 10) * 10;
 const goal = () => goalFor(run.stage);
 const sparkMul = () => 1 - HEAT_SPARKS * run.heat;
-const chainNeed = () => (BOSSES[run.stage] && BOSSES[run.stage].needChain) || 0;
+const chainNeed = () => 0;                      // chains are a scoring bonus now, not a requirement
+const bossOf = stage => (run && run.bosses && run.bosses[stage]) || null;
 const hasMod = id => run.mods.includes(id);
 const isDead = r => run.deadRows.includes(r);
+// Skill strength for a stage: tier defaults of every active skill, then the boss's own overrides.
+function buildCfg(stage, mods) {
+  const b = bossOf(stage), tier = b ? b.tier : 'medium', cfg = {};
+  for (const id of mods) Object.assign(cfg, (SKILL_CFG[id] || {})[tier] || {});
+  return Object.assign(cfg, b ? b.cfg : {});
+}
+function modLabel(id) {                          // counters shown next to the skill icon
+  switch (id) {
+    case 'rising':    return String(Math.max(0, riseEvery() - run.sinceRise));
+    case 'machine':   return run.machines.map(machineLabel).join('\u00b7');
+    case 'frost':     return run.frost.turns > 0 ? '\u2744' + run.frost.turns : String(run.cfg.frostEvery - (run.frostCount % run.cfg.frostEvery));
+    case 'corrosion': return String(run.cfg.corrodeEvery - (run.corrodeCount % run.cfg.corrodeEvery));
+    case 'scanner':   return String(run.cfg.scanEvery - (run.scanTurns % run.cfg.scanEvery));
+    case 'timer':     return String(Math.max(0, run.turnsLeft));
+    default:          return '';
+  }
+}
 // Modifiers of a stage: the boss's own, plus `heat` extra ones from stage 5 on. Rolled once, then remembered.
 function modsFor(stage) {
   if (run.plan[stage]) return run.plan[stage];
-  const mods = (BOSSES[stage] ? BOSSES[stage].mods : []).slice();
+  const mods = (bossOf(stage) ? bossOf(stage).mods : []).slice();
   if (run.heat > 0 && stage >= HEAT_FROM_STAGE) {
     const pool = HEAT_POOL.filter(m => !mods.includes(m));
     for (let n = run.heat; n > 0 && pool.length; n--) mods.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
@@ -265,51 +347,56 @@ function newRun() {
 function startStage() {
   grid = emptyGrid(); chain = 0; chainTiles = 0; clearing = null; lastLock = null; shop = null; summary = null;
   particles = []; texts = []; paused = false; volt = 0;
-  stageScore = 0; stageMaxChain = 0; chainWarned = false; driftAcc = 0;
+  stageScore = 0; stageMaxChain = 0; chainWarned = false; driftAcc = 0; staticAcc = 0;
   run.netUsed = false; level = run.stage; run.sinceRise = 0;
   run.mods = modsFor(run.stage);
-  run.machine = hasMod('machine') ? newMachine() : null;
+  run.cfg = buildCfg(run.stage, run.mods);
+  run.turnNo = 0; run.scanTurns = 0; run.corrodeCount = 0; run.frostCount = 0; run.frost = { col: -1, turns: 0 };
+  run.turnsLeft = run.cfg.turnLimit || 0;
+  run.machines = [];
+  if (hasMod('machine')) for (let i = 0; i < (run.cfg.machines || 1); i++) run.machines.push(newMachine(i));
   run.deadRows = [];
-  if (hasMod('deadrows')) {
+  if (hasMod('deadrows') || hasMod('scanner')) {
     const rows = [];
     for (let r = DEAD_ROW_FROM; r < ROWS; r++) rows.push(r);
-    while (run.deadRows.length < DEAD_ROWS) run.deadRows.push(rows.splice((Math.random() * rows.length) | 0, 1)[0]);
+    while (run.deadRows.length < (run.cfg.deadRows || 3)) run.deadRows.push(rows.splice((Math.random() * rows.length) | 0, 1)[0]);
     run.deadRows.sort((a, b) => a - b);
   }
   while (queue.length < 3) queue.push(makeNext());
-  if (run.mods.length || chainNeed()) { state = 'briefing'; return; }   // read the rules, then Enter
+  if (run.mods.length) { state = 'briefing'; return; }   // read the rules, then Enter
   popText('ЕТАП ' + run.stage, WALL + BW / 2, BH / 2 - 30, '#ffe066', 28);
   popText('ціль ' + goal(), WALL + BW / 2, BH / 2 + 6, '#e8eefc', 18);
   spawn();
 }
 function beginStage() { spawn(); }
+function riseEvery() { return (run.cfg && run.cfg.riseEvery) || BAL.riseEvery; }
 
-// ---- Laser machine (boss modifier) ----------------------------------
-// It rides along above the board, one column per turn (a turn = a tile spawning). After a few moves it stops;
-// 1-2 turns later it fires and destroys the top tile of its column. No score for anything it destroys.
+// ---- Boss skills that act once per turn (a turn = a tile spawning) ---------
 const rollRange = ([lo, hi]) => lo + ((Math.random() * (hi - lo + 1)) | 0);
-const machineNeed = () => rollRange(BAL.machineSteps);
-function newMachine() {
-  const col = (Math.random() * COLS) | 0;
-  return { col, x: col, dir: Math.random() < 0.5 ? -1 : 1, mode: 'move', steps: 0, need: machineNeed(), aim: 0, cool: 0, beam: 0, beamY: 0, armed: false };
+
+// Laser machine: rides along above the board, stops, aims for 1-2 turns, fires at the top tile of its column
+// (no score), recharges, rides again.
+function newMachine(i) {
+  const col = i ? (run.machines[0].col + 3) % COLS : (Math.random() * COLS) | 0;
+  return { col, x: col, dir: Math.random() < 0.5 ? -1 : 1, mode: 'move', steps: i ? 1 : 0, need: rollRange(run.cfg.mSteps), aim: 0, cool: 0, beam: 0, beamY: 0 };
 }
-const machineLabel = () => { const m = run.machine; return m.mode === 'aim' ? '!' + m.aim : m.mode === 'cool' ? '⏳' + m.cool : String(Math.max(0, m.need - m.steps)); };
-function machineTurn() {
-  const m = run.machine;
+const machineLabel = m => m.mode === 'aim' ? '!' + m.aim : m.mode === 'cool' ? '\u23F3' + m.cool : String(Math.max(0, m.need - m.steps));
+function machineTurn(m) {
+  const c = run.cfg;
   if (m.mode === 'move') {
     let nc = m.col + m.dir;
     if (nc < 0 || nc >= COLS) { m.dir = -m.dir; nc = m.col + m.dir; }
     m.col = nc; m.steps++;
-    if (m.steps >= m.need) { m.mode = 'aim'; m.aim = 1 + ((Math.random() * 2) | 0); beep(260, 0.12, 'square', 0.04); }
+    if (m.steps >= m.need) { m.mode = 'aim'; m.aim = rollRange(c.mAim); beep(260, 0.12, 'square', 0.04); }
   } else if (m.mode === 'aim') {
-    if (--m.aim <= 0) { machineFire(); m.mode = 'cool'; m.cool = rollRange(BAL.machineCool); }
+    if (--m.aim <= 0) { machineFire(m); m.mode = 'cool'; m.cool = rollRange(c.mCool); }
   } else if (--m.cool <= 0) {                   // recharged: ride again
-    m.mode = 'move'; m.steps = 0; m.need = machineNeed();
+    m.mode = 'move'; m.steps = 0; m.need = rollRange(c.mSteps);
     if (Math.random() < 0.5) m.dir = -m.dir;
   }
 }
-function machineFire() {
-  const m = run.machine, r = topInCol(m.col);
+function machineFire(m) {
+  const r = topInCol(m.col);
   m.beam = 260; m.beamY = (r >= 0 ? r + 1 : ROWS) * T;
   if (r >= 0) {
     grid[r][m.col] = null;                      // destroyed without score
@@ -319,12 +406,61 @@ function machineFire() {
   }
   beep(520, 0.25, 'sawtooth', 0.05, -380);
 }
-// Bosses can set their own rising speed (riseEvery); everything else uses BAL.riseEvery.
-function riseEvery() { return (BOSSES[run.stage] && BOSSES[run.stage].riseEvery) || BAL.riseEvery; }
+// Scanner: the dead rows crawl down one row (wrapping), all together.
+function scanShift() {
+  const span = ROWS - DEAD_ROW_FROM;
+  run.deadRows = run.deadRows.map(r => (r - DEAD_ROW_FROM + 1) % span + DEAD_ROW_FROM).sort((a, b) => a - b);
+  popText('СКАНЕР', WALL + BW / 2, 16, '#ff9b8f', 14); beep(200, 0.12, 'square', 0.03);
+}
+// Frost: every few turns a random column (never the spawn column) freezes for a few turns; nothing can enter it.
+function frostTurn() {
+  const f = run.frost;
+  if (f.turns > 0) { f.turns--; return; }
+  if (++run.frostCount % run.cfg.frostEvery === 0) {
+    let c; do { c = (Math.random() * COLS) | 0; } while (c === COLS >> 1);
+    f.col = c; f.turns = rollRange(run.cfg.frostTurns);
+    popText('МОРОЗ', WALL + (c + 0.5) * T, 44, '#8fd8ff', 18); beep(900, 0.2, 'sine', 0.04, -300);
+  }
+}
+// Corrosion: a tile marked rusty last turn becomes an insulator now, and every few turns a new tile gets marked.
+function corrodeTurn() {
+  let changed = false;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const t = grid[r][c];
+    if (t && t.rust) {
+      const n = newTile('ins', 0); n.dy = r; grid[r][c] = n; changed = true;
+      burst(WALL + (c + 0.5) * T, (r + 0.5) * T, '#c8763a', 8);
+    }
+  }
+  if (++run.corrodeCount % run.cfg.corrodeEvery === 0) {
+    const cands = [];
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c] && grid[r][c].mask) cands.push([r, c]);
+    if (cands.length) {
+      const [r, c] = cands[(Math.random() * cands.length) | 0];
+      grid[r][c].rust = true;
+      popText('ІРЖА', WALL + (c + 0.5) * T, r * T + 10, '#ffb347', 14); beep(300, 0.1, 'triangle', 0.04);
+    }
+  }
+  if (changed) { updateFlags(flood(true)); beep(180, 0.15, 'sawtooth', 0.04); }
+}
+// Short fuse: a turn limit. Running out costs a fuse and grants a few extra turns.
+function timerTurn() {
+  if (--run.turnsLeft >= 0) return;
+  run.fuses--; run.turnsLeft = run.cfg.turnExtra || 8;
+  popText('ЧАС ВИЙШОВ  \u22121', WALL + BW / 2, BH / 2 - 40, '#ff6a5a', 22); beep(160, 0.5, 'sawtooth', 0.06, -110);
+  if (run.fuses <= 0) gameOver();
+}
+
 function spawn() {
   canHold = true;
   if (hasMod('rising') && run.sinceRise >= riseEvery()) { run.sinceRise = 0; risePush(); return; }
-  if (run.machine) { if (run.machine.armed) machineTurn(); run.machine.armed = true; }   // the machine moves once per tile
+  if (run.turnNo++ > 0) {                       // boss skills act once per tile, but not on the very first one
+    for (const m of run.machines) machineTurn(m);
+    if (hasMod('scanner') && ++run.scanTurns % run.cfg.scanEvery === 0) scanShift();
+    if (hasMod('frost')) frostTurn();
+    if (hasMod('corrosion')) corrodeTurn();
+    if (hasMod('timer')) { timerTurn(); if (state === 'over') return; }
+  }
   run.sinceRise++;
   startPiece(queue.shift());
   queue.push(makeNext());
@@ -341,7 +477,7 @@ function risePush() {
     if (t) t.dy = r + 1;                        // animates upward
   }
   const gaps = new Set();
-  while (gaps.size < BAL.riseGaps) gaps.add((Math.random() * COLS) | 0);
+  while (gaps.size < (run.cfg.riseGaps || BAL.riseGaps)) gaps.add((Math.random() * COLS) | 0);
   for (let c = 0; c < COLS; c++) {
     const t = gaps.has(c) ? null : newTile('ins', 0);
     if (t) t.dy = ROWS;
@@ -437,7 +573,7 @@ function nextStage() { run.stage++; startStage(); }
 
 // ---- Grid helpers ---------------------------------------------------
 const inRange = (r, c) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
-const canMove = (r, c) => inRange(r, c) && !grid[r][c];
+const canMove = (r, c) => inRange(r, c) && !grid[r][c] && !(run.frost && run.frost.turns > 0 && run.frost.col === c);
 const wallReach = () => 1 + pk('magnet');       // how many columns from a wall still touch it
 
 // Flood-fill from the left (or right) wall along matching openings.
@@ -801,10 +937,17 @@ function updatePlay(dt) {
   if (!cur) return;
   if (hasMod('drift')) {                        // Drift: the falling tile gets nudged sideways now and then
     driftAcc += dt;
-    if (driftAcc >= DRIFT_MS) {
+    if (driftAcc >= (run.cfg.driftMs || 2400)) {
       driftAcc = 0;
       const d = Math.random() < 0.5 ? -1 : 1;
       if (canMove(cur.row, cur.col + d)) cur.col += d;
+    }
+  }
+  if (hasMod('static')) {                       // Static: the falling tile turns by itself
+    staticAcc += dt;
+    if (staticAcc >= (run.cfg.staticMs || 3000)) {
+      staticAcc = 0; cur.tile.mask = rotCW(cur.tile.mask);
+      burst(WALL + (cur.col + 0.5) * T, (cur.row + 0.5) * T, '#9fb0ff', 8); beep(700, 0.05, 'square', 0.03);
     }
   }
   const down = keys.has('ArrowDown') || keys.has('KeyS');
@@ -823,7 +966,7 @@ function updatePlay(dt) {
 
 function update(dt) {
   const moving = animTiles(dt);
-  if (run.machine) { run.machine.x += (run.machine.col - run.machine.x) * Math.min(1, dt * 0.012); if (run.machine.beam > 0) run.machine.beam -= dt; }
+  for (const m of run.machines) { m.x += (m.col - m.x) * Math.min(1, dt * 0.012); if (m.beam > 0) m.beam -= dt; }
   if (state === 'play') updatePlay(dt);
   else if (state === 'clearing') updateClearing(dt);
   else if (state === 'settling' && !moving) resolve();
@@ -1036,6 +1179,11 @@ function drawTile(x, y, t, s, alpha = 1) {
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText('Ω', cx, cy + 1);
   }
+  if (t.rust) {                                 // corrosion warning
+    rr(p, p, s - 2 * p, s - 2 * p, s * 0.12); g.fillStyle = 'rgba(255,140,40,0.35)'; g.fill();
+    g.lineWidth = 2; g.strokeStyle = '#ffb347'; g.stroke();
+    g.fillStyle = '#ffb347'; g.font = `800 ${s * 0.4}px system-ui`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('!', s - s * 0.2, s * 0.22);
+  }
   g.restore();
 }
 
@@ -1090,8 +1238,8 @@ function machineSprite(cx, y, aimNum, st) {
   if (aiming) { g.fillStyle = '#fff'; g.font = '700 10px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(aimNum), 0, 8.5); }
   g.restore();
 }
-function drawMachine(now) {
-  const m = run.machine, aim = m.mode === 'aim', tr = topInCol(m.col);
+function drawMachine(m, now) {
+  const aim = m.mode === 'aim', tr = topInCol(m.col);
   const bx = WALL + (m.col + 0.5) * T;
   if (aim || m.beam > 0) {
     g.save();
@@ -1137,18 +1285,38 @@ function drawBoard(now) {
     if (t) drawTile(WALL + c * T, t.dy * T, t, T);
   }
 
+  const fr = run.frost;                         // frozen column
+  if (fr && fr.turns > 0) {
+    const fx = WALL + fr.col * T;
+    g.fillStyle = 'rgba(120,200,255,0.18)'; g.fillRect(fx, 0, T, BH);
+    g.strokeStyle = 'rgba(160,220,255,0.75)'; g.lineWidth = 2; g.strokeRect(fx + 1, 1, T - 2, BH - 2);
+    g.fillStyle = '#bfe8ff'; g.font = `700 16px ${EMOJI}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('\u2744\uFE0F' + fr.turns, fx + T / 2, 34);
+  }
+  const fog = hasMod('fog'), fogH = (run.cfg.fogRows || 4) * T;
   if (cur && state === 'play') {
+    const foggy = fog && cur.y * T < fogH - T * 0.5;
     let gr = cur.row;
     while (canMove(gr + 1, cur.col)) gr++;
-    if (gr > cur.row) {
+    if (gr > cur.row && !fog) {                 // landing hint (fog hides it)
       g.save(); g.setLineDash([4, 4]); g.strokeStyle = 'rgba(255,255,255,0.28)'; g.lineWidth = 1.5;
       rr(WALL + cur.col * T + 3, gr * T + 3, T - 6, T - 6, 6); g.stroke(); g.restore();
       drawTile(WALL + cur.col * T, gr * T, cur.tile, T, 0.2);
     }
-    drawTile(WALL + curX * T, cur.y * T, cur.tile, T);
+    if (foggy) {                                // the falling tile is hidden until it leaves the fog
+      const fx = WALL + curX * T, fy = cur.y * T;
+      rr(fx + 3, fy + 3, T - 6, T - 6, 8); g.fillStyle = '#1a2233'; g.fill();
+      g.strokeStyle = '#3a4a66'; g.lineWidth = 1.5; g.stroke();
+      g.fillStyle = '#56637a'; g.font = '700 20px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('?', fx + T / 2, fy + T / 2 + 1);
+    } else drawTile(WALL + curX * T, cur.y * T, cur.tile, T);
+  }
+  if (fog) {                                    // haze over the fog rows
+    const gg = g.createLinearGradient(0, 0, 0, fogH);
+    gg.addColorStop(0, 'rgba(170,190,215,0.18)'); gg.addColorStop(1, 'rgba(170,190,215,0)');
+    g.fillStyle = gg; g.fillRect(WALL, 0, BW, fogH);
   }
 
-  if (run.machine) drawMachine(now);
+  for (const m of run.machines) drawMachine(m, now);
   for (const p of particles) {
     g.globalAlpha = Math.max(0, p.life / p.max); g.fillStyle = p.color;
     g.fillRect(p.x - 2, p.y - 2, 4, 4);
@@ -1208,24 +1376,23 @@ function drawPanel(now) {
   const gp = Math.min(1, stageScore / goal());
   if (gp > 0.01) { g.fillStyle = gp >= 1 ? '#7dffb0' : '#ffe066'; rr(x, 162, Math.max(8, w * gp), 12, 4); g.fill(); }
 
-  // active modifiers (rising shows how many pieces are left until the next push) and the boss's chain requirement
+  // active boss skills with their counters
   g.textAlign = 'left'; g.textBaseline = 'alphabetic';
   let mx = x;
   for (const id of run.mods) {
+    if (mx > x + w - 24) break;
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 194); mx += 20;
-    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 194); mx += 16; }
-    if (id === 'machine') { g.font = '700 11px system-ui'; g.fillStyle = run.machine && run.machine.mode === 'aim' ? '#ff5a4a' : '#ffb347'; g.fillText(run.machine ? machineLabel() : '', mx, 194); mx += 20; }
-  }
-  if (chainNeed()) {
-    const ok = stageMaxChain >= chainNeed();
-    g.textAlign = 'right'; g.font = '700 11px system-ui'; g.fillStyle = ok ? '#7dffb0' : '#ff9bd0';
-    g.fillText('ЛАНЦЮЖОК ×' + chainNeed() + (ok ? ' \u2713' : ''), x + w, 194); g.textAlign = 'left';
+    const lb = modLabel(id);
+    if (lb) {
+      g.font = '700 11px system-ui'; g.fillStyle = (id === 'machine' && run.machines.some(m => m.mode === 'aim')) ? '#ff5a4a' : '#ffb347';
+      g.fillText(lb, mx, 194); mx += g.measureText(lb).width + 8;
+    }
   }
 
   lab('ДАЛІ', x, 216);
   for (let i = 0; i < queue.length; i++) {
     const s = i === 0 ? 44 : 38, tx = x + (i === 0 ? 0 : 6), ty = 224 + i * 46 + (i ? 6 : 0);
-    if (hasMod('blind')) {                      // Blackout: the preview is hidden
+    if (hasMod('fog')) {                      // Blackout: the preview is hidden
       rr(tx + 2, ty + 2, s - 4, s - 4, 6); g.fillStyle = '#10151f'; g.fill();
       g.strokeStyle = '#27344a'; g.lineWidth = 1.5; g.stroke();
       g.fillStyle = '#56637a'; g.font = '700 18px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';
@@ -1318,14 +1485,14 @@ function drawShop() {
   button(x0, by, bw, 48, kb(4) + 'Полагодити', full ? 'усі цілі' : 'запобіжник  ◆ ' + repairCost(), !full && run.sparks >= repairCost(), buyRepair);
   button(x0 + bw + 12, by, bw, 48, kb(5) + 'Оновити', 'пропозиції  ◆ ' + rerollCost(), run.sparks >= rerollCost(), rerollShop);
 
-  const ny = by + 60, ns = run.stage + 1, bs = BOSSES[ns], nm = modsFor(ns);
+  const ny = by + 60, ns = run.stage + 1, bs = bossOf(ns), nm = modsFor(ns);
   rr(x0, ny, w, 64, 10);
   g.fillStyle = bs ? '#3a1a1a' : '#1d3a2a'; g.fill();
   g.lineWidth = 2; g.strokeStyle = bs ? '#ff6a5a' : '#7dffb0'; g.stroke();
   g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#e8eefc';
-  fitText(bs ? (ns === STAGES ? 'ФІНАЛ: ' : 'БОС: ') + bs.name : 'ЕТАП ' + ns, cx, ny + 17, w - 16, 15, '800');
+  fitText(bs ? (bs.tier === 'hard' ? 'ФІНАЛ: ' : 'БОС: ') + bs.name : 'ЕТАП ' + ns, cx, ny + 17, w - 16, 15, '800');
   g.fillStyle = '#c3cfe6';
-  fitText('ціль ' + goalFor(ns) + (bs && bs.needChain ? '  \u2022  потрібен ланцюжок \u00d7' + bs.needChain : ''), cx, ny + 35, w - 16, 12);
+  fitText('ціль ' + goalFor(ns), cx, ny + 35, w - 16, 12);
   g.fillStyle = nm.length ? '#ffb347' : '#9fb0cc';
   fitText(nm.length ? nm.map(id => MODS[id].icon + ' ' + MODS[id].name).join('   ') : T_CONT, cx, ny + 52, w - 16, 11);
   shopHits.push({ x: x0, y: ny, w, h: 64, fn: nextStage });
@@ -1392,27 +1559,25 @@ function drawHeatPicker() {
 // Rules screen shown before a boss or modified stage.
 function drawBriefing() {
   g.fillStyle = 'rgba(8,11,18,0.92)'; g.fillRect(WALL, 0, BW, BH);
-  const cx = WALL + BW / 2, b = BOSSES[run.stage];
+  const cx = WALL + BW / 2, b = bossOf(run.stage);
+  const tierLabel = { easy: 'БОС  \u2022  ЛЕГКИЙ', medium: 'БОС  \u2022  СЕРЕДНІЙ', hard: 'ФІНАЛЬНИЙ БОС' };
   g.textAlign = 'center'; g.textBaseline = 'middle';
   g.fillStyle = b ? '#ff6a5a' : '#ffb347'; g.font = '700 13px system-ui';
-  g.fillText(b ? (run.stage === STAGES ? 'ФІНАЛЬНИЙ БОС' : 'БОС  \u2022  ЕТАП ' + run.stage) : (run.heat ? 'НАГРІВ ' + run.heat : ''), cx, 50);
-  g.fillStyle = '#ffe066'; g.font = '800 28px system-ui'; g.fillText(b ? b.name : 'ЕТАП ' + run.stage, cx, 86);
-  g.fillStyle = '#e8eefc'; g.font = '18px system-ui'; g.fillText('Ціль: ' + goal(), cx, 126);
-  if (chainNeed()) { g.fillStyle = '#ff9bd0'; g.font = '700 14px system-ui'; g.fillText('+ ланцюжок \u00d7' + chainNeed() + ': ' + (chainNeed() === 2 ? 'два кола' : chainNeed() + ' кола') + ' за один хід', cx, 152); }
-  const compact = run.mods.length >= 3;          // leave room for the tips panel
-  let y = 188;
-  for (const id of run.mods) {
+  g.fillText(b ? tierLabel[b.tier] : (run.heat ? 'НАГРІВ ' + run.heat : ''), cx, 44);
+  g.fillStyle = '#ffe066'; g.font = '800 28px system-ui'; g.fillText(b ? b.name : 'ЕТАП ' + run.stage, cx, 78);
+  g.fillStyle = '#e8eefc'; g.font = '18px system-ui'; g.fillText('Ціль: ' + goal(), cx, 112);
+  let y = 138;
+  run.mods.forEach((id, i) => {
     const m = MODS[id];
-    g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `${compact ? 22 : 26}px ${EMOJI}`; g.fillStyle = '#e8eefc';
-    g.fillText(m.icon, WALL + 20, y + (compact ? 12 : 14));
-    g.textBaseline = 'alphabetic'; g.font = `700 ${compact ? 14 : 15}px system-ui`; g.fillStyle = '#ffb347';
-    g.fillText(m.name, WALL + 62, y + (compact ? 9 : 10));
-    g.font = `${compact ? 11 : 12}px system-ui`; g.fillStyle = '#9fb0cc';
-    const lines = wrap(m.desc, BW - 90);
-    lines.forEach((ln, i) => g.fillText(ln, WALL + 62, y + (compact ? 24 : 30) + i * (compact ? 13 : 16)));
-    y += Math.max(compact ? 54 : 66, (compact ? 30 : 36) + lines.length * (compact ? 13 : 16));   // grow with long descriptions
-  }
-  if (b && b.tips) drawBossTips(b, y + 4);
+    g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `22px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(m.icon, WALL + 20, y + 14);
+    g.textBaseline = 'alphabetic'; g.font = '700 14px system-ui'; g.fillStyle = '#ffb347'; g.fillText(m.name, WALL + 56, y + 11);
+    g.font = '11px system-ui'; g.fillStyle = '#9fb0cc'; g.fillText(m.short, WALL + 56, y + 26);
+    if (b && i >= b.core && i < b.mods.length) {   // a skill rolled at random for this run
+      g.textAlign = 'right'; g.fillStyle = '#7fd6ff'; g.font = '700 10px system-ui'; g.fillText('\u{1F3B2} ВИПАДКОВА', WALL + BW - 16, y + 11);
+    }
+    y += 40;
+  });
+  if (b) drawBossTips(y + 2);
   g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#7dffb0'; g.font = '700 15px system-ui';
   g.fillText(T_START, cx, BH - 26);
 }
@@ -1483,16 +1648,16 @@ function drawMachineDiagram(x, y, w) {
   }
 }
 
-// "How to beat it" panel on a boss briefing, from y down to just above the start hint.
-function drawBossTips(b, y) {
+// "How to beat it" panel on a boss briefing, from y down to just above the start hint. One tip per active skill.
+function drawBossTips(y) {
   const x0 = WALL + 14, w = BW - 28, bottom = BH - 46, DH = 72;
-  const tips = b.tips.map(t => t.replace('{C}', TOUCH ? '' : ' (C)'));
+  const tips = run.mods.map(id => MODS[id].tip.replace('{C}', TOUCH ? '' : ' (C)'));
   const font = () => `${fs}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
   let fs = 12, lh = 15, wrapped;
   const layout = () => { g.font = font(); wrapped = tips.map(t => wrap(t, w - 36)); };
   layout();
   const need = withD => 30 + (withD ? DH : 0) + wrapped.reduce((n, l) => n + l.length * lh + 3, 0);
-  let showD = !!b.diagram;
+  let showD = hasMod('machine');
   if (need(showD) > bottom - y) { fs = 10.5; lh = 13; layout(); }
   if (showD && need(true) > bottom - y) showD = false;          // no room for the picture on very crowded stages
   rr(x0, y, w, bottom - y, 8); g.fillStyle = 'rgba(125,255,176,0.06)'; g.fill();
@@ -1500,7 +1665,7 @@ function drawBossTips(b, y) {
   g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillStyle = '#7dffb0'; g.font = '700 11px system-ui';
   g.fillText('ЯК ПЕРЕМОГТИ', x0 + 12, y + 18);
   let ty = y + 30;
-  if (showD) { (b.diagram === 'machine' ? drawMachineDiagram : drawChainDiagram)(x0, ty + 4, w); ty += DH; }
+  if (showD) { drawMachineDiagram(x0, ty + 4, w); ty += DH; }
   ty += 8;
   wrapped.forEach(lines => {
     g.textAlign = 'left'; g.textBaseline = 'alphabetic';
@@ -1527,11 +1692,15 @@ function drawHud(now) {
   g.textAlign = 'left'; g.textBaseline = 'alphabetic';
   g.fillStyle = '#ffe066'; g.font = '800 16px system-ui'; g.fillText('CIRCUIT DROP', 12, 22);
   if (run.heat) { g.fillStyle = '#ff8a3d'; g.font = `700 12px ${EMOJI}`; g.fillText('\u{1F525} ' + run.heat, 126, 22); }
-  let mx = 166;                                  // active modifiers (rising: pieces until the next push)
+  let mx = 166;                                  // active boss skills with their counters
   for (const id of run.mods) {
+    if (mx > 330) break;
     g.font = `13px ${EMOJI}`; g.fillStyle = '#ffb347'; g.fillText(MODS[id].icon, mx, 22); mx += 20;
-    if (id === 'rising') { g.font = '700 11px system-ui'; g.fillText(String(Math.max(0, riseEvery() - run.sinceRise)), mx, 22); mx += 16; }
-    if (id === 'machine') { g.font = '700 11px system-ui'; g.fillStyle = run.machine && run.machine.mode === 'aim' ? '#ff5a4a' : '#ffb347'; g.fillText(run.machine ? machineLabel() : '', mx, 22); mx += 20; }
+    const lb = modLabel(id);
+    if (lb) {
+      g.font = '700 11px system-ui'; g.fillStyle = (id === 'machine' && run.machines.some(m => m.mode === 'aim')) ? '#ff5a4a' : '#ffb347';
+      g.fillText(lb, mx, 22); mx += g.measureText(lb).width + 8;
+    }
   }
   if (PLAY_STATES.includes(state)) {
     touchButton(CW - 46, 6, 34, 28, '\u{1F392}', 'perks', true, 14);
@@ -1549,7 +1718,7 @@ function drawHud(now) {
   lab('ДАЛІ', 250, 44);
   for (let i = 0; i < queue.length; i++) {
     const s = i === 0 ? 40 : 34, tx = [250, 298, 338][i], ty = 50;
-    if (hasMod('blind')) {
+    if (hasMod('fog')) {
       rr(tx + 2, ty + 2, s - 4, s - 4, 6); g.fillStyle = '#10151f'; g.fill();
       g.strokeStyle = '#27344a'; g.lineWidth = 1.5; g.stroke();
       g.fillStyle = '#56637a'; g.font = '700 16px system-ui'; g.textAlign = 'center'; g.textBaseline = 'middle';

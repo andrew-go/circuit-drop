@@ -21,6 +21,7 @@ window.BOT = (function () {
   }
   function playStage(stage, eps, o = {}) {
     heat = o.heat || 0; newRun(); run.stage = stage; for (const k in (o.perks || {})) run.perks[k] = o.perks[k];
+    if (o.bossId) run.bosses[stage] = rollBoss(BOSS_TIER[stage], o.bossId, o.extras);   // force a boss (and optionally its extra skills)
     startStage(); if (state === 'briefing') beginStage();
     let pieces = 0, steps = 0, maxChain = 0; const f0 = run.fuses;
     while (steps < 80000 && !['over', 'stagewin', 'shop', 'victory'].includes(state) && pieces < (o.maxPieces || 300)) {
