@@ -59,10 +59,21 @@ const MODS = {
   drift:    { icon: '\u{1F32C}\uFE0F',  name: 'Дрейф',             desc: 'Падаюча плитка час від часу зсувається вбік.' },
 };
 const HEAT_POOL = ['rising', 'blind', 'deadrows', 'drift'];   // extra modifiers Heat can add from stage 5
+// tips: shown on the briefing screen. {C} becomes " (C)" on a keyboard and disappears on touch.
 const BOSSES = {
-  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'],                      needChain: 2 },
-  6: { name: 'ЗАТЕМНЕННЯ',        mods: ['blind', 'deadrows'] },
-  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2 },
+  3: { name: 'ПЕРЕНАПРУГА',       mods: ['rising'],                      needChain: 2,
+       tips: ['Що таке ланцюжок ×2: ваша плитка замикає коло, воно зникає, плитки над ним падають і самі замикають ще одне коло. Два кола за один хід.',
+              'На схемі: червоне коло A сходами лежить на синьому колі B. Остання плитка замикає A, воно зникає, і B падає на дно та замикається.',
+              'Лічильник \u{1F9F1} вгорі: скільки плиток до нового ряду ізоляторів. Будуйте внизу.',
+              'Робіть ланцюжок рано, поки стопка низька.'] },
+  6: { name: 'ЗАТЕМНЕННЯ',        mods: ['blind', 'deadrows'],
+       tips: ['Наступні плитки приховані: тримайте запас{C} і прибирайте хрестовини та трійники. Вони підходять майже скрізь.',
+              'Затемнені ряди не торкаються стін, але плитки в них проводять струм по вертикалі. Ведіть коло через «живі» ряди.',
+              'Незручна плитка? Сила ХРЕСТ робить її чотиристоронньою. Магніт скорочує коло на колонку з кожного боку.'] },
+  9: { name: 'КОРОТКЕ ЗАМИКАННЯ', mods: ['rising', 'blind', 'deadrows'], needChain: 2,
+       tips: ['Потрібен ланцюжок ×2: два кола за один хід (див. схему). Ще й прихований перегляд та мертві ряди.',
+              'Робіть ланцюжок одразу, поки поле низьке, і стежте за лічильником \u{1F9F1}.',
+              'Прийдіть із запобіжниками, зарядом на силу й Магнітом чи Страхувальною сіткою.'] },
 };
 
 const fallInterval = () => Math.max(110, (800 - (level - 1) * 50) * (1 + 0.25 * pk('slowfall')) / (pk('overclock') ? 1.4 : 1));
@@ -404,6 +415,46 @@ function flood(fromLeft) {
   }
   return dist;
 }
+// A "piece" is a group of tiles linked to each other. A piece that touches both walls is a closed circuit,
+// and every closed piece clears (branches included). Wires that touch only one wall stay where they are,
+// which is what makes chains possible: they can drop into place after the first clear.
+function linkedNeighbours(r, c) {
+  const t = grid[r][c], out = [];
+  for (const D of DIRS) {
+    if (!(t.mask & D.bit)) continue;
+    const nr = r + D.dr, nc = c + D.dc;
+    if (!inRange(nr, nc)) continue;
+    const n = grid[nr][nc];
+    if (n && (n.mask & opp(D.bit))) out.push([nr, nc]);
+  }
+  return out;
+}
+function closedCells() {
+  const reach = wallReach(), seen = new Set(), cells = [];
+  for (let r0 = 0; r0 < ROWS; r0++) for (let c0 = 0; c0 < COLS; c0++) {
+    if (!grid[r0][c0] || !grid[r0][c0].mask || seen.has(r0 * COLS + c0)) continue;
+    const piece = [[r0, c0]]; seen.add(r0 * COLS + c0);
+    for (let i = 0; i < piece.length; i++) {
+      for (const [nr, nc] of linkedNeighbours(piece[i][0], piece[i][1])) {
+        const k = nr * COLS + nc;
+        if (!seen.has(k)) { seen.add(k); piece.push([nr, nc]); }
+      }
+    }
+    const seeds = piece.filter(([r, c]) => !isDead(r) && c < reach && (grid[r][c].mask & LEFT));
+    const touchesRight = piece.some(([r, c]) => !isDead(r) && c >= COLS - reach && (grid[r][c].mask & RIGHT));
+    if (!seeds.length || !touchesRight) continue;
+    const dist = new Map(seeds.map(([r, c]) => [r * COLS + c, 0])), q = seeds.slice();   // spark distance from the + wall
+    for (let i = 0; i < q.length; i++) {
+      const d = dist.get(q[i][0] * COLS + q[i][1]);
+      for (const [nr, nc] of linkedNeighbours(q[i][0], q[i][1])) {
+        const k = nr * COLS + nc;
+        if (!dist.has(k)) { dist.set(k, d + 1); q.push([nr, nc]); }
+      }
+    }
+    for (const [r, c] of piece) cells.push({ r, c, d: dist.get(r * COLS + c) || 0, fired: false });
+  }
+  return cells;
+}
 function updateFlags(L) {
   const R = flood(false);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
@@ -447,19 +498,9 @@ function lockPiece() {
 }
 
 function resolve() {
-  const L = flood(true);
-  let closed = false;
-  for (const k of L.keys()) {
-    const r = (k / COLS) | 0, c = k % COLS;
-    if (c >= COLS - wallReach() && (grid[r][c].mask & RIGHT) && !isDead(r)) { closed = true; break; }
-  }
-  if (closed) {
-    const cells = [];
-    for (const [k, d] of L) cells.push({ r: (k / COLS) | 0, c: k % COLS, d, fired: false });
-    startClear(cells, 'circuit');
-    return;
-  }
-  updateFlags(L);
+  const cells = closedCells();
+  if (cells.length) { startClear(cells, 'circuit'); return; }
+  updateFlags(flood(true));
   if (chain > 0 && chainTiles >= ALL_CLEAR_MIN && grid.every(row => row.every(t => !t))) {
     const bonus = ALL_CLEAR_BASE + ALL_CLEAR_PER * run.stage;
     addScore(bonus); popText('ПОЛЕ ЧИСТЕ  +' + bonus, WALL + BW / 2, BH / 2, '#7dffb0', 22);
@@ -1202,18 +1243,87 @@ function drawBriefing() {
   g.fillText(b ? (run.stage === STAGES ? 'ФІНАЛЬНИЙ БОС' : 'БОС  \u2022  ЕТАП ' + run.stage) : (run.heat ? 'НАГРІВ ' + run.heat : ''), cx, 50);
   g.fillStyle = '#ffe066'; g.font = '800 28px system-ui'; g.fillText(b ? b.name : 'ЕТАП ' + run.stage, cx, 86);
   g.fillStyle = '#e8eefc'; g.font = '18px system-ui'; g.fillText('Ціль: ' + goal(), cx, 126);
-  if (chainNeed()) { g.fillStyle = '#ff9bd0'; g.font = '700 14px system-ui'; g.fillText('+ ланцюжок \u00d7' + chainNeed() + ' за один хід', cx, 152); }
-  let y = 192;
+  if (chainNeed()) { g.fillStyle = '#ff9bd0'; g.font = '700 14px system-ui'; g.fillText('+ ланцюжок \u00d7' + chainNeed() + ': ' + (chainNeed() === 2 ? 'два кола' : chainNeed() + ' кола') + ' за один хід', cx, 152); }
+  const compact = run.mods.length >= 3;          // leave room for the tips panel
+  let y = 188;
   for (const id of run.mods) {
     const m = MODS[id];
-    g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `26px ${EMOJI}`; g.fillStyle = '#e8eefc'; g.fillText(m.icon, WALL + 20, y + 14);
-    g.textBaseline = 'alphabetic'; g.font = '700 15px system-ui'; g.fillStyle = '#ffb347'; g.fillText(m.name, WALL + 62, y + 10);
-    g.font = '12px system-ui'; g.fillStyle = '#9fb0cc';
-    wrap(m.desc, BW - 90).forEach((ln, i) => g.fillText(ln, WALL + 62, y + 30 + i * 16));
-    y += 78;
+    g.textAlign = 'left'; g.textBaseline = 'middle'; g.font = `${compact ? 22 : 26}px ${EMOJI}`; g.fillStyle = '#e8eefc';
+    g.fillText(m.icon, WALL + 20, y + (compact ? 12 : 14));
+    g.textBaseline = 'alphabetic'; g.font = `700 ${compact ? 14 : 15}px system-ui`; g.fillStyle = '#ffb347';
+    g.fillText(m.name, WALL + 62, y + (compact ? 9 : 10));
+    g.font = `${compact ? 11 : 12}px system-ui`; g.fillStyle = '#9fb0cc';
+    wrap(m.desc, BW - 90).forEach((ln, i) => g.fillText(ln, WALL + 62, y + (compact ? 24 : 30) + i * (compact ? 13 : 16)));
+    y += compact ? 54 : 66;
   }
+  if (b && b.tips) drawBossTips(b, y + 4);
   g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#7dffb0'; g.font = '700 15px system-ui';
-  g.fillText(T_START, cx, BH - 34);
+  g.fillText(T_START, cx, BH - 26);
+}
+// Mini picture of a chain. Red = circuit A, blue = circuit B (rows 9..11 of a 7-column board).
+// 1: A is one tile short. 2: that tile lands, A closes. 3: A is gone, B has dropped and closed too.
+function drawChainDiagram(x, y, w) {
+  const s = 14, gap = 12, fw = 7 * s, x0 = x + (w - (3 * fw + 2 * gap)) / 2;
+  const mk = (mask, own, lit) => ({ kind: 'normal', mask, hp: 1, dy: 0, lit, cl: own === 'A', cr: own === 'B' });
+  const H = 10;                                   // horizontal straight
+  const frame = n => {
+    const f = [Array(7).fill(null), Array(7).fill(null), Array(7).fill(null)];
+    const lit = n === 2;
+    if (n < 3) {
+      f[0][2] = mk(H, 'B');
+      f[1][0] = mk(H, 'B'); f[1][1] = mk(H, 'B');
+      f[1][2] = mk(6, 'A', lit); f[1][3] = mk(H, 'A', lit); f[1][4] = mk(H, 'A', lit); f[1][6] = mk(H, 'A', lit);
+      if (n === 2) f[1][5] = mk(H, 'A', true);
+      f[2][0] = mk(H, 'A', lit); f[2][1] = mk(H, 'A', lit); f[2][2] = mk(9, 'A', lit);
+      for (let c = 3; c < 7; c++) f[2][c] = mk(H, 'B');
+    } else {
+      for (let c = 0; c < 7; c++) f[2][c] = mk(H, 'B', true);
+    }
+    return f;
+  };
+  const captions = ['1. Остання плитка', '2. Коло A зникає', '3. B падає: ×2'];
+  for (let n = 1; n <= 3; n++) {
+    const fx = x0 + (n - 1) * (fw + gap), f = frame(n);
+    rr(fx - 1, y - 1, fw + 2, 3 * s + 2, 3); g.fillStyle = '#0f1623'; g.fill();
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 7; c++) if (f[r][c]) drawTile(fx + c * s, y + r * s, f[r][c], s);
+    if (n === 1) {                                // the missing tile
+      g.save(); g.setLineDash([2, 2]); g.strokeStyle = '#ffe066'; g.lineWidth = 1;
+      g.strokeRect(fx + 5 * s + 1.5, y + s + 1.5, s - 3, s - 3); g.restore();
+      g.fillStyle = '#ffe066'; g.font = '700 9px system-ui'; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+      g.fillText('\u25BC', fx + 5.5 * s, y - 3);
+    }
+    if (n < 3) { g.fillStyle = '#56637a'; g.font = '700 12px system-ui'; g.textAlign = 'center'; g.fillText('\u25B6', fx + fw + gap / 2, y + 1.5 * s + 4); }
+    g.fillStyle = n === 3 ? '#7dffb0' : '#9fb0cc'; g.font = '700 9.5px system-ui'; g.textAlign = 'center';
+    g.fillText(captions[n - 1], fx + fw / 2, y + 3 * s + 13);
+  }
+}
+
+// "How to beat it" panel on a boss briefing, from y down to just above the start hint.
+function drawBossTips(b, y) {
+  const x0 = WALL + 14, w = BW - 28, bottom = BH - 46, DH = 72;
+  const tips = b.tips.map(t => t.replace('{C}', TOUCH ? '' : ' (C)'));
+  const font = () => `${fs}px system-ui, "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+  let fs = 12, lh = 15, wrapped;
+  const layout = () => { g.font = font(); wrapped = tips.map(t => wrap(t, w - 36)); };
+  layout();
+  const need = withD => 30 + (withD ? DH : 0) + wrapped.reduce((n, l) => n + l.length * lh + 3, 0);
+  let showD = !!b.needChain;
+  if (need(showD) > bottom - y) { fs = 10.5; lh = 13; layout(); }
+  if (showD && need(true) > bottom - y) showD = false;          // no room for the picture on very crowded stages
+  rr(x0, y, w, bottom - y, 8); g.fillStyle = 'rgba(125,255,176,0.06)'; g.fill();
+  g.lineWidth = 1.5; g.strokeStyle = '#2d5a44'; g.stroke();
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic'; g.fillStyle = '#7dffb0'; g.font = '700 11px system-ui';
+  g.fillText('ЯК ПЕРЕМОГТИ', x0 + 12, y + 18);
+  let ty = y + 30;
+  if (showD) { drawChainDiagram(x0, ty + 4, w); ty += DH; }
+  ty += 8;
+  wrapped.forEach(lines => {
+    g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+    g.font = font(); g.fillStyle = '#c3cfe6';
+    g.fillText('\u2022', x0 + 12, ty);
+    lines.forEach((ln, i) => g.fillText(ln, x0 + 24, ty + i * lh));
+    ty += lines.length * lh + 3;
+  });
 }
 
 // ---- Phone layout: HUD above the board, controls below ----------------
